@@ -1,5 +1,5 @@
 ---
-title: "stress exploratory analysis"
+title: "Heat and Mental Health Exploratory Analysis"
 output: html_document
 date: "2024-11-08"
 ---
@@ -8,7 +8,7 @@ date: "2024-11-08"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 ## Load in the packages 
 library(here)
 library(tidyverse)
@@ -21,7 +21,7 @@ source(here("explore_weather_data.R")) # heat_averages is output of interest
 ```
 
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 ## Simplify the data
 pss_simple <- pss_recode %>% select(mstudyid, survey_datetime, PSS4)
 
@@ -38,16 +38,32 @@ crisis_simple <- crisis_data %>%
 
 
 ## Distribution of PSS Data 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # Distribution analysis of pre and post PSS scores
 ggplot(pss_simple, aes(x = PSS4)) +
   geom_histogram(bins = 17, col = "black", fill = "steelblue") +
-  ggtitle("Distribution of PSS4") +
+  ggtitle("Perceived Stress Scores Follow a Normal Distribution") +
   theme_minimal()
 ```
 
 ## Distributions of Crisis Data 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+event_labels <- c(
+  fin_events = "Financial", 
+  leg_events = "Legal", 
+  car_events = "Career", 
+  rel_events = "Relationship", 
+  homesf_events = "Home safety", 
+  neighsf_events = "Neighborhood safety", 
+  medself_events = "Self medical", 
+  medoth_events = "Other medical", 
+  home_events = "Home", 
+  prej_events = "Prejudice", 
+  auth_events = "Authority", 
+  oth_events = "Other"
+)
+
+
 # Select only the `events` columns
 events_columns <- crisis_simple %>%
   select(ends_with("events")) %>%
@@ -61,16 +77,19 @@ events_summary_df <- data.frame(
   Count = events_summary
 )
 
+# Plot with the updated labels
 ggplot(events_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
   geom_bar(stat = "identity") +
+  scale_x_discrete(labels = event_labels) +
   labs(
-    title = "Summary of Events",
-    subtitle = "Total number of events that occured regardless of emotional response",
+    title = "Total number of events that occurred regardless of emotional response",
     x = "Domain",
     y = "Count of Events"
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
 
 
 # Select only the `neg` columns
@@ -85,16 +104,36 @@ neg_summary_df <- data.frame(
   Count = neg_summary
 )
 
+
+neg_event_labels <- c(
+  crifinneg = "Financial", 
+  crilegalneg = "Legal", 
+  cricareerneg = "Career", 
+  crirelneg = "Relationship", 
+  crihomesafeneg = "Home safety", 
+  crineighsafeneg = "Neighborhood safety", 
+  crimedselfneg = "Self medical", 
+  crimedothneg = "Other medical", 
+  crihomeneg = "Home", 
+  criprejneg = "Prejudice", 
+  criauthneg = "Authority", 
+  criothneg = "Other"
+)
+
+
+# Plot with the updated labels
 ggplot(neg_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
   geom_bar(stat = "identity") +
+  scale_x_discrete(labels = neg_event_labels) +
   labs(
-    title = "Summary of Negative Events",
-    subtitle = "Number of events with a negative emotional response",
+    title = "Total number of negatively perceived events that occurred",
     x = "Domain",
-    y = "Count of Negative Events"
+    y = "Count of Events"
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
 
 
 # Select only the `nds` columns
@@ -111,35 +150,134 @@ nds_summary_df <- data.frame(
   Count = nds_summary
 )
 
+nds_labels <- c(
+  fin_nds = "Financial", 
+  leg_nds = "Legal", 
+  car_nds = "Career", 
+  rel_nds = "Relationship", 
+  homesf_nds = "Home safety", 
+  neighsf_nds = "Neighborhood safety", 
+  medself_nds = "Self medical", 
+  medoth_nds = "Other medical", 
+  home_nds = "Home", 
+  prej_nds = "Prejudice", 
+  auth_nds = "Authority", 
+  oth_nds = "Other"
+)
+
+
 ggplot(nds_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
   geom_bar(stat = "identity") +
+  scale_x_discrete(labels = nds_labels) +
   labs(
-    title = "Summary of Negative Domain Scores (NDS)",
-    subtitle = "Binary yes/no negative for each category",
+    title = "Number of negative domains experienced",
     x = "Domain",
-    y = "Count of Negative Events"
+    y = "Count of NDS Sum"
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-## Distribution of NDS for Each Category (need to covert 0s to NA when appropriate)
+## Distribution of NDS for Each Category (should I replace 0 with NA if the event never happened?)
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # Reshape data for ggplot with counts for 0 and 1
 domain_data <- crisis_data %>%
   select(fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, neighsf_nds, 
          medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
-  pivot_longer(cols = everything(), names_to = "Domain", values_to = "StressScore") %>%
-  group_by(Domain, StressScore) %>%
-  summarise(Count = n(), .groups = 'drop')
+  pivot_longer(cols = everything(), names_to = "domain", values_to = "valence_score") %>%
+  group_by(domain, valence_score) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  ungroup() %>%
+  mutate(domain = recode(domain,
+                         fin_nds = "Financial", 
+                         leg_nds = "Legal", 
+                         car_nds = "Career", 
+                         rel_nds = "Relationship", 
+                         homesf_nds = "Home safety", 
+                         neighsf_nds = "Neighborhood safety", 
+                         medself_nds = "Self medical", 
+                         medoth_nds = "Other medical", 
+                         home_nds = "Home", 
+                         prej_nds = "Prejudice", 
+                         auth_nds = "Authority", 
+                         oth_nds = "Other"))
 
 # Bar plots for each domain with geom_col
-ggplot(domain_data, aes(x = StressScore, y = Count)) +
+ggplot(domain_data, aes(x = valence_score, y = Count)) +
   geom_col(color = "black", fill = "steelblue", alpha = 1) +
-  facet_wrap(~ Domain) +
+  facet_wrap(~domain) +
   theme_minimal() +
-  labs(title = "Distribution of Stress Scores Across Domains", x = "Stress Score", y = "Count")
+  labs(title = "Distribution of Valence Scores Across Domains", x = "Event Valence Score", y = "Count")
+
+
+
+negative_event_data <- crisis_data %>%
+  select(mstudyid, fin_events, leg_events, car_events, rel_events, homesf_events, 
+         neighsf_events, medself_events, medoth_events, home_events, prej_events, 
+         auth_events, oth_events, fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, 
+         neighsf_nds, medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
+  mutate(
+    experienced_auth_neg = ifelse(auth_events > 0, 1, 0),
+    experienced_fin_neg = ifelse(fin_events > 0, 1, 0),
+    experienced_leg_neg = ifelse(leg_events > 0, 1, 0),
+    experienced_car_neg = ifelse(car_events > 0, 1, 0),
+    experienced_rel_neg = ifelse(rel_events > 0, 1, 0),
+    experienced_homesf_neg = ifelse(homesf_events > 0, 1, 0),
+    experienced_neighsf_neg = ifelse(neighsf_events > 0, 1, 0),
+    experienced_medself_neg = ifelse(medself_events > 0, 1, 0),
+    experienced_medoth_neg = ifelse(medoth_events > 0, 1, 0),
+    experienced_home_neg = ifelse(home_events > 0, 1, 0),
+    experienced_prej_neg = ifelse(prej_events > 0, 1, 0),
+    experienced_oth_neg = ifelse(oth_events > 0, 1, 0)
+  ) %>%
+  mutate(
+    auth_nds = ifelse(experienced_auth_neg == 1, auth_nds, NA),
+    fin_nds = ifelse(experienced_fin_neg == 1, fin_nds, NA),
+    leg_nds = ifelse(experienced_leg_neg == 1, leg_nds, NA),
+    car_nds = ifelse(experienced_car_neg == 1, car_nds, NA),
+    rel_nds = ifelse(experienced_rel_neg == 1, rel_nds, NA),
+    homesf_nds = ifelse(experienced_homesf_neg == 1, homesf_nds, NA),
+    neighsf_nds = ifelse(experienced_neighsf_neg == 1, neighsf_nds, NA),
+    medself_nds = ifelse(experienced_medself_neg == 1, medself_nds, NA),
+    medoth_nds = ifelse(experienced_medoth_neg == 1, medoth_nds, NA),
+    home_nds = ifelse(experienced_home_neg == 1, home_nds, NA),
+    prej_nds = ifelse(experienced_prej_neg == 1, prej_nds, NA),
+    oth_nds = ifelse(experienced_oth_neg == 1, oth_nds, NA)
+  )
+
+
+
+# Reshape data for ggplot with counts for 0 and 1 in the new dataset
+domain_data <- negative_event_data %>%
+  select(fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, neighsf_nds, 
+         medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
+  pivot_longer(cols = everything(), names_to = "domain", values_to = "valence_score") %>%
+  filter(!is.na(valence_score)) %>%  # Exclude NA values to count only observed cases
+  group_by(domain, valence_score) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  ungroup() %>%
+  mutate(domain = recode(domain,
+                         fin_nds = "Financial", 
+                         leg_nds = "Legal", 
+                         car_nds = "Career", 
+                         rel_nds = "Relationship", 
+                         homesf_nds = "Home safety", 
+                         neighsf_nds = "Neighborhood safety", 
+                         medself_nds = "Self medical", 
+                         medoth_nds = "Other medical", 
+                         home_nds = "Home", 
+                         prej_nds = "Prejudice", 
+                         auth_nds = "Authority", 
+                         oth_nds = "Other"))
+
+# Bar plots for each domain with geom_col, excluding NA values
+ggplot(domain_data, aes(x = valence_score, y = Count)) +
+  geom_col(color = "black", fill = "steelblue", alpha = 1) +
+  facet_wrap(~ domain) +
+  theme_minimal() +
+  labs(title = "Distribution of Valence Scores Across Domains (Excluding NA)", x = "Event Valence Score", y = "Count")
+
 
 
 # Bar for the total stress score
@@ -151,7 +289,7 @@ ggplot(neg_event_count_data, aes(x = total_negative_responses, y = n)) +
   geom_col(fill = "steelblue", color = "black") +
   geom_text(aes(label = n), vjust = -0.5) +
   theme_minimal() +
-  labs(title = "Distribution of Total Stress Score", x = "Total Stress Score", y = "Count")
+  labs(title = "Distribution of Total Valence Score", x = "Total Valence Score", y = "Count")
 
 
 # Bar for the sum NDS score
@@ -164,12 +302,14 @@ ggplot(nds_count_data, aes(x = sum_nds, y = n)) +
   geom_text(aes(label = n), vjust = -0.5) +
   theme_minimal() +
   labs(title = "Distribution of Sum NDS", x = "Sum NDS", y = "Count")
+
+
 ```
 
 
 ## Distributions of Heat Data
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # Prepare data in long format for plotting
 temp_data_long <- heat_averages %>%
   select(mstudyid, starts_with("wbgt_"), starts_with("tmax_"), starts_with("heat_index_")) %>%
@@ -181,7 +321,11 @@ temp_data_long <- heat_averages %>%
   )
 
 # Define the order for Period
-temp_data_long$Period <- factor(temp_data_long$Period, levels = c("pre_conception_avg", "first_trimester_avg", "second_trimester_avg", "third_trimester_avg", "pregnancy_avg"))
+temp_data_long$Period <- factor(temp_data_long$Period, 
+                                levels = c("pre_conception_avg", "first_trimester_avg", "second_trimester_avg", "third_trimester_avg", "pregnancy_avg"),
+                                labels = c("Pre-conception Average", "First Trimester Average",
+                                           "Second Trimester Average", "Third Trimester Average",
+                                           "Pregnancy Average"))
 
 # Ridgeline plot
 ggplot(temp_data_long, aes(x = Temperature, y = Period, fill = Measurement)) +
@@ -193,20 +337,22 @@ ggplot(temp_data_long, aes(x = Temperature, y = Period, fill = Measurement)) +
   scale_fill_brewer(palette = "Set2")
 
 
+
 # Box plot with custom Period order
 ggplot(temp_data_long, aes(x = Period, y = Temperature, fill = Measurement)) +
-  geom_boxplot() +
+  geom_boxplot(alpha = 0.8) +
   theme_minimal() +
   labs(title = "Temperature Distributions Across Periods and Measurement Types",
        x = "Period",
        y = "Temperature") +
-  scale_fill_brewer(palette = "Set2")
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
 ```
 
 
 ## Stress by Temperature Distribution across Periods 
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 crisis_merged <- inner_join(crisis_data, heat_averages, by = "mstudyid")
 
 pss_heat_merged <- pss_simple %>%
@@ -214,31 +360,59 @@ pss_heat_merged <- pss_simple %>%
 ```
 
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # Scatter plot of WBGT temperature vs. total_negative_responses
 ggplot(crisis_merged, aes(x = wbgt_pregnancy_avg, y = total_negative_responses)) +
   geom_point(alpha = 0.5) +
   geom_smooth(method = "lm", color = "blue") +
   theme_minimal() +
-  labs(title = "Total Negative Responses vs. Average WBGT Temperature (Pregnancy)", 
-       x = "Average WBGT Temperature (Pregnancy)", y = "Total Negative Responses")
+  labs(title = "Increased Average Temperature Associated with More Negatively \nPerceived Events", 
+       x = "Average WBGT Temperature over Pregnancy and Pre-conception", y = "Total Negative Responses")
 
 # Boxplots to categorize temperature into bins
 crisis_merged <- crisis_merged %>%
-  mutate(temp_category = cut(wbgt_pregnancy_avg, breaks = 3, labels = c("Low", "Medium", "High")))
+  mutate(wbgt_temp_category = cut(wbgt_pregnancy_avg, breaks = 3, labels = c("Low", "Medium", "High")))
 
-ggplot(crisis_merged, aes(x = temp_category, y = total_negative_responses, fill = temp_category)) +
+ggplot(crisis_merged, aes(x = wbgt_temp_category, y = total_negative_responses, fill = wbgt_temp_category)) +
   geom_boxplot() +
   theme_minimal() +
   labs(title = "Boxplot of Total Negative Responses by WBGT Temperature Category", 
+       subtitle = "Temp Categories Broken into Terciles \ncould be adjusted to have breaks based on temp severity cutoffs",
        x = "Temperature Category", y = "Total Negative Responses")
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Create long format for temperature variables across periods
+temp_stress_long <- crisis_merged %>%
+  select(mstudyid, total_negative_responses, 
+         wbgt_pre_conception_avg, wbgt_first_trimester_avg, 
+         wbgt_second_trimester_avg, wbgt_third_trimester_avg, wbgt_pregnancy_avg) %>%
+  pivot_longer(cols = starts_with("wbgt"), 
+               names_to = "Period", 
+               values_to = "WBGT_Temperature") %>%
+  mutate(Period = recode(Period, 
+                         "wbgt_pre_conception_avg" = "Pre-Conception", 
+                         "wbgt_first_trimester_avg" = "First Trimester", 
+                         "wbgt_second_trimester_avg" = "Second Trimester", 
+                         "wbgt_third_trimester_avg" = "Third Trimester", 
+                         "wbgt_pregnancy_avg" = "Overall Pregnancy"))
+
+# Scatter plot with linear fit lines for each period
+ggplot(temp_stress_long, aes(x = WBGT_Temperature, y = total_negative_responses)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "blue") +
+  facet_wrap(~ Period, scales = "free_x") +
+  theme_minimal() +
+  labs(title = "Total Negative Responses vs. WBGT Temperature Across Pregnancy Stages", 
+       x = "WBGT Temperature", y = "Total Negative Responses")
 
 ```
 
 
 ## NLE Unadjusted Regressions
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # Linear regressions for each temperature variable predicting total_negative_responses
 wbgt_models <- list(
   lm(total_negative_responses ~ wbgt_pre_conception_avg, data = crisis_merged),
@@ -251,12 +425,9 @@ wbgt_models <- list(
 # Display model summaries in a single compact table
 stargazer(wbgt_models, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
           column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
-          covariate.labels = c("Intercept", "WBGT Temperature"), 
           dep.var.labels = "Total Negative Responses", 
           omit.stat = c("f", "ser"), 
           no.space = TRUE, digits = 2)
-
-
 
 
 # Linear regressions for each temperature variable predicting total_negative_responses
@@ -271,12 +442,9 @@ tmax_models <- list(
 # Display model summaries in a single compact table
 stargazer(tmax_models, type = "text", title = "Regression Results: Total Negative Responses vs. tmax Temperatures",
           column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
-          covariate.labels = c("Intercept", "tmax Temperature"), 
           dep.var.labels = "Total Negative Responses", 
           omit.stat = c("f", "ser"), 
           no.space = TRUE, digits = 2)
-
-
 
 
 # Linear regressions for each temperature variable predicting total_negative_responses
@@ -291,7 +459,6 @@ heat_index_models <- list(
 # Display model summaries in a single compact table
 stargazer(heat_index_models, type = "text", title = "Regression Results: Total Negative Responses vs. Heat Index Temperatures",
           column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
-          covariate.labels = c("Intercept", "Heat Index Temperature"), 
           dep.var.labels = "Total Negative Responses", 
           omit.stat = c("f", "ser"), 
           no.space = TRUE, digits = 2)
@@ -301,7 +468,7 @@ stargazer(heat_index_models, type = "text", title = "Regression Results: Total N
 
 ## PSS Unadjusted Regression
 
-```{r}
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # Linear regressions for each temperature variable predicting total_negative_responses
 wbgt_models <- list(
   lm(PSS4 ~ wbgt_pre_conception_avg, data = pss_heat_merged),
@@ -312,10 +479,9 @@ wbgt_models <- list(
 )
 
 # Display model summaries in a single compact table
-stargazer(wbgt_models, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
+stargazer(wbgt_models, type = "text", title = "Regression Results: PSS vs. WBGT Temperatures",
           column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
-          covariate.labels = c("Intercept", "WBGT Temperature"), 
-          dep.var.labels = "Total Negative Responses", 
+          dep.var.labels = "Perceived Stress Score", 
           omit.stat = c("f", "ser"), 
           no.space = TRUE, digits = 2)
 
@@ -331,10 +497,9 @@ tmax_models <- list(
   lm(PSS4 ~ tmax_pregnancy_avg, data = pss_heat_merged)
 )
 # Display model summaries in a single compact table
-stargazer(tmax_models, type = "text", title = "Regression Results: Total Negative Responses vs. tmax Temperatures",
+stargazer(tmax_models, type = "text", title = "Regression Results: PSS vs. tmax Temperatures",
           column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
-          covariate.labels = c("Intercept", "tmax Temperature"), 
-          dep.var.labels = "Total Negative Responses", 
+          dep.var.labels = "Perceived Stress Score", 
           omit.stat = c("f", "ser"), 
           no.space = TRUE, digits = 2)
 
@@ -351,10 +516,9 @@ heat_index_models <- list(
 )
 
 # Display model summaries in a single compact table
-stargazer(heat_index_models, type = "text", title = "Regression Results: Total Negative Responses vs. Heat Index Temperatures",
+stargazer(heat_index_models, type = "text", title = "Regression Results: PSS vs. Heat Index Temperatures",
           column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
-          covariate.labels = c("Intercept", "Heat Index Temperature"), 
-          dep.var.labels = "Total Negative Responses", 
+          dep.var.labels = "Perceived Stress Score", 
           omit.stat = c("f", "ser"), 
           no.space = TRUE, digits = 2)
 ```
