@@ -1,0 +1,361 @@
+---
+title: "stress exploratory analysis"
+output: html_document
+date: "2024-11-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+## Load in the packages 
+library(here)
+library(tidyverse)
+library(ggridges)
+library(stargazer)
+
+source(here("clean_stress_data.R")) # pss_recode and crisis_data and the output datasets of interest
+
+source(here("explore_weather_data.R")) # heat_averages is output of interest 
+```
+
+
+```{r}
+## Simplify the data
+pss_simple <- pss_recode %>% select(mstudyid, survey_datetime, PSS4)
+
+crisis_simple <- crisis_data %>%
+  mutate(
+    quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
+    quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
+    survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
+    select(mstudyid, fin_events:survey_datetime) %>%
+  select(-c(crireadneg:crikidneg))
+```
+
+
+
+
+## Distribution of PSS Data 
+```{r}
+# Distribution analysis of pre and post PSS scores
+ggplot(pss_simple, aes(x = PSS4)) +
+  geom_histogram(bins = 17, col = "black", fill = "steelblue") +
+  ggtitle("Distribution of PSS4") +
+  theme_minimal()
+```
+
+## Distributions of Crisis Data 
+```{r}
+# Select only the `events` columns
+events_columns <- crisis_simple %>%
+  select(ends_with("events")) %>%
+  select(-total_events)
+
+events_summary <- colSums(events_columns)
+
+# Convert to a data frame for plotting
+events_summary_df <- data.frame(
+  Domain = names(events_summary),
+  Count = events_summary
+)
+
+ggplot(events_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Summary of Events",
+    subtitle = "Total number of events that occured regardless of emotional response",
+    x = "Domain",
+    y = "Count of Events"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Select only the `neg` columns
+neg_columns <- crisis_simple %>%
+  select(ends_with("neg"))
+
+neg_summary <- colSums(neg_columns)
+
+# Convert to a data frame for plotting
+neg_summary_df <- data.frame(
+  Domain = names(neg_summary),
+  Count = neg_summary
+)
+
+ggplot(neg_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Summary of Negative Events",
+    subtitle = "Number of events with a negative emotional response",
+    x = "Domain",
+    y = "Count of Negative Events"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Select only the `nds` columns
+nds_columns <- crisis_simple %>%
+  select(ends_with("nds")) %>%
+  select(-sum_nds)
+
+# Summarize by calculating the total count of '1's in each `nds` column
+nds_summary <- colSums(nds_columns)
+
+# Convert to a data frame for plotting
+nds_summary_df <- data.frame(
+  Domain = names(nds_summary),
+  Count = nds_summary
+)
+
+ggplot(nds_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Summary of Negative Domain Scores (NDS)",
+    subtitle = "Binary yes/no negative for each category",
+    x = "Domain",
+    y = "Count of Negative Events"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Distribution of NDS for Each Category (need to covert 0s to NA when appropriate)
+
+```{r}
+# Reshape data for ggplot with counts for 0 and 1
+domain_data <- crisis_data %>%
+  select(fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, neighsf_nds, 
+         medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
+  pivot_longer(cols = everything(), names_to = "Domain", values_to = "StressScore") %>%
+  group_by(Domain, StressScore) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+# Bar plots for each domain with geom_col
+ggplot(domain_data, aes(x = StressScore, y = Count)) +
+  geom_col(color = "black", fill = "steelblue", alpha = 1) +
+  facet_wrap(~ Domain) +
+  theme_minimal() +
+  labs(title = "Distribution of Stress Scores Across Domains", x = "Stress Score", y = "Count")
+
+
+# Bar for the total stress score
+neg_event_count_data <- crisis_data %>%
+  count(total_negative_responses)
+
+# Create bar plot with centered labels
+ggplot(neg_event_count_data, aes(x = total_negative_responses, y = n)) +
+  geom_col(fill = "steelblue", color = "black") +
+  geom_text(aes(label = n), vjust = -0.5) +
+  theme_minimal() +
+  labs(title = "Distribution of Total Stress Score", x = "Total Stress Score", y = "Count")
+
+
+# Bar for the sum NDS score
+nds_count_data <- crisis_data %>%
+  count(sum_nds)
+
+# Create bar plot with centered labels
+ggplot(nds_count_data, aes(x = sum_nds, y = n)) +
+  geom_col(fill = "steelblue", color = "black") +
+  geom_text(aes(label = n), vjust = -0.5) +
+  theme_minimal() +
+  labs(title = "Distribution of Sum NDS", x = "Sum NDS", y = "Count")
+```
+
+
+## Distributions of Heat Data
+
+```{r}
+# Prepare data in long format for plotting
+temp_data_long <- heat_averages %>%
+  select(mstudyid, starts_with("wbgt_"), starts_with("tmax_"), starts_with("heat_index_")) %>%
+  pivot_longer(
+    cols = -mstudyid,
+    names_to = c("Measurement", "Period"),
+    names_pattern = "^(wbgt|tmax|heat_index)_(.*)$",  # Captures "heat_index" as a single term and everything after as "Period"
+    values_to = "Temperature"
+  )
+
+# Define the order for Period
+temp_data_long$Period <- factor(temp_data_long$Period, levels = c("pre_conception_avg", "first_trimester_avg", "second_trimester_avg", "third_trimester_avg", "pregnancy_avg"))
+
+# Ridgeline plot
+ggplot(temp_data_long, aes(x = Temperature, y = Period, fill = Measurement)) +
+  geom_density_ridges(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Ridgeline Plot of Temperature Measurements by Period",
+       x = "Temperature (WBGT, Tmax, Heat Index)",
+       y = "Period") +
+  scale_fill_brewer(palette = "Set2")
+
+
+# Box plot with custom Period order
+ggplot(temp_data_long, aes(x = Period, y = Temperature, fill = Measurement)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Temperature Distributions Across Periods and Measurement Types",
+       x = "Period",
+       y = "Temperature") +
+  scale_fill_brewer(palette = "Set2")
+```
+
+
+## Stress by Temperature Distribution across Periods 
+
+```{r}
+crisis_merged <- inner_join(crisis_data, heat_averages, by = "mstudyid")
+
+pss_heat_merged <- pss_simple %>%
+  left_join(heat_averages, by = "mstudyid")
+```
+
+
+```{r}
+# Scatter plot of WBGT temperature vs. total_negative_responses
+ggplot(crisis_merged, aes(x = wbgt_pregnancy_avg, y = total_negative_responses)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "blue") +
+  theme_minimal() +
+  labs(title = "Total Negative Responses vs. Average WBGT Temperature (Pregnancy)", 
+       x = "Average WBGT Temperature (Pregnancy)", y = "Total Negative Responses")
+
+# Boxplots to categorize temperature into bins
+crisis_merged <- crisis_merged %>%
+  mutate(temp_category = cut(wbgt_pregnancy_avg, breaks = 3, labels = c("Low", "Medium", "High")))
+
+ggplot(crisis_merged, aes(x = temp_category, y = total_negative_responses, fill = temp_category)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Boxplot of Total Negative Responses by WBGT Temperature Category", 
+       x = "Temperature Category", y = "Total Negative Responses")
+
+```
+
+
+## NLE Unadjusted Regressions
+
+```{r}
+# Linear regressions for each temperature variable predicting total_negative_responses
+wbgt_models <- list(
+  lm(total_negative_responses ~ wbgt_pre_conception_avg, data = crisis_merged),
+  lm(total_negative_responses ~ wbgt_first_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ wbgt_second_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ wbgt_third_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ wbgt_pregnancy_avg, data = crisis_merged)
+)
+
+# Display model summaries in a single compact table
+stargazer(wbgt_models, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
+          column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
+          covariate.labels = c("Intercept", "WBGT Temperature"), 
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
+
+
+
+
+# Linear regressions for each temperature variable predicting total_negative_responses
+tmax_models <- list(
+  lm(total_negative_responses ~ tmax_pre_conception_avg, data = crisis_merged),
+  lm(total_negative_responses ~ tmax_first_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ tmax_second_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ tmax_third_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ tmax_pregnancy_avg, data = crisis_merged)
+)
+
+# Display model summaries in a single compact table
+stargazer(tmax_models, type = "text", title = "Regression Results: Total Negative Responses vs. tmax Temperatures",
+          column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
+          covariate.labels = c("Intercept", "tmax Temperature"), 
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
+
+
+
+
+# Linear regressions for each temperature variable predicting total_negative_responses
+heat_index_models <- list(
+  lm(total_negative_responses ~ heat_index_pre_conception_avg, data = crisis_merged),
+  lm(total_negative_responses ~ heat_index_first_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ heat_index_second_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ heat_index_third_trimester_avg, data = crisis_merged),
+  lm(total_negative_responses ~ heat_index_pregnancy_avg, data = crisis_merged)
+)
+
+# Display model summaries in a single compact table
+stargazer(heat_index_models, type = "text", title = "Regression Results: Total Negative Responses vs. Heat Index Temperatures",
+          column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
+          covariate.labels = c("Intercept", "Heat Index Temperature"), 
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
+```
+
+
+
+## PSS Unadjusted Regression
+
+```{r}
+# Linear regressions for each temperature variable predicting total_negative_responses
+wbgt_models <- list(
+  lm(PSS4 ~ wbgt_pre_conception_avg, data = pss_heat_merged),
+  lm(PSS4 ~ wbgt_first_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ wbgt_second_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ wbgt_third_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ wbgt_pregnancy_avg, data = pss_heat_merged)
+)
+
+# Display model summaries in a single compact table
+stargazer(wbgt_models, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
+          column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
+          covariate.labels = c("Intercept", "WBGT Temperature"), 
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
+
+
+
+
+# Linear regressions for each temperature variable predicting total_negative_responses
+tmax_models <- list(
+  lm(PSS4 ~ tmax_pre_conception_avg, data = pss_heat_merged),
+  lm(PSS4 ~ tmax_first_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ tmax_second_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ tmax_third_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ tmax_pregnancy_avg, data = pss_heat_merged)
+)
+# Display model summaries in a single compact table
+stargazer(tmax_models, type = "text", title = "Regression Results: Total Negative Responses vs. tmax Temperatures",
+          column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
+          covariate.labels = c("Intercept", "tmax Temperature"), 
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
+
+
+
+
+# Linear regressions for each temperature variable predicting total_negative_responses
+heat_index_models <- list(
+  lm(PSS4 ~ heat_index_pre_conception_avg, data = pss_heat_merged),
+  lm(PSS4 ~ heat_index_first_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ heat_index_second_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ heat_index_third_trimester_avg, data = pss_heat_merged),
+  lm(PSS4 ~ heat_index_pregnancy_avg, data = pss_heat_merged)
+)
+
+# Display model summaries in a single compact table
+stargazer(heat_index_models, type = "text", title = "Regression Results: Total Negative Responses vs. Heat Index Temperatures",
+          column.labels = c("Pre-Conception", "First Trimester", "Second Trimester", "Third Trimester", "Pregnancy"),
+          covariate.labels = c("Intercept", "Heat Index Temperature"), 
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
+```
+
