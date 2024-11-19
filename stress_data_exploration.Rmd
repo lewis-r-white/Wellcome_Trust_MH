@@ -17,21 +17,59 @@ library(stargazer)
 
 source(here("clean_stress_data.R")) # pss_recode and crisis_data and the output datasets of interest
 
-source(here("explore_weather_data.R")) # heat_averages is output of interest 
+source(here("explore_weather_data.R")) # wbgt_cascade and heat_averages are outputs of interest 
 ```
 
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 ## Simplify the data
-pss_simple <- pss_recode %>% select(mstudyid, survey_datetime, PSS4)
+pss_simple <- pss_recode %>% select(mstudyid, survey_datetime, PSS4, datdeliv:term_at_survey)
 
 crisis_simple <- crisis_data %>%
   mutate(
     quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
     quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
     survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
-    select(mstudyid, fin_events:survey_datetime) %>%
+    select(mstudyid, fin_events:survey_datetime, datdeliv:term_at_survey) %>%
   select(-c(crireadneg:crikidneg))
+
+wbgt_cascade_simple <- wbgt_cascade %>%
+  select(community, time, twx) %>%
+  mutate(community = str_remove(community, "_manual$"))
+
+
+
+# Define the periods you want to calculate (in months)
+prior_periods <- c(1, 2, 3)  # Specify months for which averages are calculated
+
+# Function to calculate average temperature for a given period
+calc_temp_avg <- function(pss_data, wbgt_data, period) {
+  pss_data %>%
+    rowwise() %>%
+    mutate(
+      !!paste0("avg_temp_", period, "_months_prior") := wbgt_data %>%
+        filter(
+          community == vname,  # Match community
+          time >= survey_date - (period * 30) & time < survey_date - ((period - 1) * 30)  # Dynamic range
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp)
+    ) %>%
+    ungroup()
+}
+
+# Start with survey_date column for convenience
+pss_simple <- pss_simple %>%
+  mutate(survey_date = as.Date(survey_datetime))
+
+# Apply calc_temp_avg for all prior periods and combine results
+result <- reduce(prior_periods, function(df, period) {
+  calc_temp_avg(df, wbgt_cascade_simple, period)
+}, .init = pss_simple)
+
+# View result
+print(result)
+
 ```
 
 
@@ -178,37 +216,37 @@ ggplot(nds_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-## Distribution of NDS for Each Category (should I replace 0 with NA if the event never happened?)
+## Distribution of NDS for Each Category
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
-# Reshape data for ggplot with counts for 0 and 1
-domain_data <- crisis_data %>%
-  select(fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, neighsf_nds, 
-         medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
-  pivot_longer(cols = everything(), names_to = "domain", values_to = "valence_score") %>%
-  group_by(domain, valence_score) %>%
-  summarise(Count = n(), .groups = 'drop') %>%
-  ungroup() %>%
-  mutate(domain = recode(domain,
-                         fin_nds = "Financial", 
-                         leg_nds = "Legal", 
-                         car_nds = "Career", 
-                         rel_nds = "Relationship", 
-                         homesf_nds = "Home safety", 
-                         neighsf_nds = "Neighborhood safety", 
-                         medself_nds = "Self medical", 
-                         medoth_nds = "Other medical", 
-                         home_nds = "Home", 
-                         prej_nds = "Prejudice", 
-                         auth_nds = "Authority", 
-                         oth_nds = "Other"))
-
-# Bar plots for each domain with geom_col
-ggplot(domain_data, aes(x = valence_score, y = Count)) +
-  geom_col(color = "black", fill = "steelblue", alpha = 1) +
-  facet_wrap(~domain) +
-  theme_minimal() +
-  labs(title = "Distribution of Valence Scores Across Domains", x = "Event Valence Score", y = "Count")
+# # Reshape data for ggplot with counts for 0 and 1
+# domain_data <- crisis_data %>%
+#   select(fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, neighsf_nds, 
+#          medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
+#   pivot_longer(cols = everything(), names_to = "domain", values_to = "valence_score") %>%
+#   group_by(domain, valence_score) %>%
+#   summarise(Count = n(), .groups = 'drop') %>%
+#   ungroup() %>%
+#   mutate(domain = recode(domain,
+#                          fin_nds = "Financial", 
+#                          leg_nds = "Legal", 
+#                          car_nds = "Career", 
+#                          rel_nds = "Relationship", 
+#                          homesf_nds = "Home safety", 
+#                          neighsf_nds = "Neighborhood safety", 
+#                          medself_nds = "Self medical", 
+#                          medoth_nds = "Other medical", 
+#                          home_nds = "Home", 
+#                          prej_nds = "Prejudice", 
+#                          auth_nds = "Authority", 
+#                          oth_nds = "Other"))
+# 
+# # Bar plots for each domain with geom_col
+# ggplot(domain_data, aes(x = valence_score, y = Count)) +
+#   geom_col(color = "black", fill = "steelblue", alpha = 1) +
+#   facet_wrap(~domain) +
+#   theme_minimal() +
+#   labs(title = "Distribution of Valence Scores Across Domains", x = "Event Valence Score", y = "Count")
 
 
 
@@ -276,7 +314,7 @@ ggplot(domain_data, aes(x = valence_score, y = Count)) +
   geom_col(color = "black", fill = "steelblue", alpha = 1) +
   facet_wrap(~ domain) +
   theme_minimal() +
-  labs(title = "Distribution of Valence Scores Across Domains (Excluding NA)", x = "Event Valence Score", y = "Count")
+  labs(title = "Distribution of Valence Scores Across Domains (If Event Occurred)", x = "Event Valence Score", y = "Count")
 
 
 
