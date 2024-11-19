@@ -8,6 +8,12 @@ library(here) # file paths
 library(haven)
 
 
+# Importing Birth Time Data 
+
+delivery_date <- read_csv(here("data", "GRAPHS_datdeliv_vname.csv"))
+
+
+
 # Importing data from Excel ----
 stress_NLE <- read_dta(here("data", "Stress_NLE.dta"))
 
@@ -46,8 +52,19 @@ pss_recode <- pss_clean %>%
   ) %>%
   mutate(
     PSS4 = ifelse(rowSums(is.na(select(., recode_psa, recode_psb, recode_psc, recode_psd))) > 1, NA, rowSums(select(., recode_psa, recode_psb, recode_psc, recode_psd), na.rm = TRUE))
+  ) %>%
+  left_join(delivery_date) %>% 
+  mutate(diffdays = difftime(datdeliv, survey_date, units = "days")) %>%
+  mutate(
+    term_at_survey = case_when(
+      diffdays > 42 ~ "far_postnatal",
+      diffdays >= 0 & diffdays <= 42 ~ "post_partem",
+      diffdays < 0 & diffdays >= -84 ~ "third_trimester",
+      diffdays < -84 & diffdays >= -189 ~ "second_trimester",
+      diffdays < -189 & diffdays >= -280 ~ "first_trimester",
+      diffdays < -280 ~ "pre_conception"
+    )
   )
-
 
 
 
@@ -129,6 +146,18 @@ crisis_data <- crisis_data %>%
   mutate(
     # Resilience score based on total events and total negative responses
     resilience_score = ifelse(total_events > 0, 1 - (total_negative_responses / total_events), NA)
+  ) %>%
+  left_join(delivery_date) %>% 
+  mutate(diffdays = difftime(datdeliv, quessetd, units = "days")) %>%
+  mutate(
+    term_at_survey = case_when(
+      diffdays > 42 ~ "far_postnatal",
+      diffdays >= 0 & diffdays <= 42 ~ "post_partem",
+      diffdays < 0 & diffdays >= -84 ~ "third_trimester",
+      diffdays < -84 & diffdays >= -189 ~ "second_trimester",
+      diffdays < -189 & diffdays >= -280 ~ "first_trimester",
+      diffdays < -280 ~ "pre_conception"
+    )
   )
 
 # Setting up labels for clarity

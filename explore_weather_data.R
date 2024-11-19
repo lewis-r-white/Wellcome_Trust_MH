@@ -7,7 +7,10 @@ library(haven)
 
 
 # load in the data ----
-wbgt_cascade <- read_csv(here("data", "Ghana-Tw-Extract.csv"))
+wbgt_cascade <- read_csv(here("data", "Ghana-Tw-Extract.csv")) %>%
+  filter(time > as.Date("2013-01-01"),
+         time < as.Date("2016-01-01"))
+
 
 wbgt_graphs_pregnancy <- read_csv(here("data", "WBGT_GRAPHS_pregnancy_wide.csv"))
 
