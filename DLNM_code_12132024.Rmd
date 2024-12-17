@@ -1,0 +1,380 @@
+---
+title: "DLNM Code"
+author: "Michelle Li"
+date: "2024-12-13"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+    toc_float: true
+---
+
+
+# Data
+
+```{r}
+library(dlnm)
+data(chicagoNMMAPS)
+```
+
+Temperature is from chicagoNMMAPS, with simulated outcome days and risk factor. 750 event occurs (outcome = TRUE), 1000 event does not occur (outcome = FALSE).
+
+```{r echo = FALSE}
+# 1000 no event, 750 event
+# randomly sample a date, then randomly sample a year
+set.seed(123)
+event_months = sample(seq(1, 12, 1), size = 750, prob = c(0.05, 0.05, 0.05, 0.07, 0.1, 0.175, 0.175, 0.1, 0.08, 0.05, 0.05, 0.05), replace = TRUE)
+no_event_months = sample(seq(1, 12, 1), size = 1000, prob = c(0.175, 0.1, 0.07, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.08, 0.1, 0.175), replace = TRUE)
+event_day = sample(seq(1, 28, 1), size = 750, replace = TRUE)
+no_event_day = sample(seq(1, 28, 1), size = 1000, replace = TRUE)
+event_years = sample(seq(1990, 2000), size = 750, replace = TRUE)
+no_event_years = sample(seq(1990, 2000), size = 1000, replace = TRUE)
+
+event_dates = paste0(event_months, "/", event_day, "/", event_years)
+temp_event_df = data.frame(event_date = event_dates, temp = NA, outcome = TRUE)
+temp_event_df$event_date = as.Date(temp_event_df$event_date, format = "%m/%d/%Y")
+temp_event_df$DLNM_start_date = temp_event_df$event_date - 7
+temp_event_df$id = paste0("ID", sample(1:750, size = 750, replace = FALSE))
+
+no_event_dates = paste0(no_event_months, "/", no_event_day, "/", no_event_years)
+temp_no_event_df = data.frame(event_date = no_event_dates, temp = NA, outcome = FALSE)
+temp_no_event_df$event_date = as.Date(temp_no_event_df$event_date, format = "%m/%d/%Y")
+temp_no_event_df$DLNM_start_date = temp_no_event_df$event_date - 7
+temp_no_event_df$id = paste0("ID", sample(751:1750, size = 1000, replace = FALSE))
+
+
+DLNM_temp_event_df = temp_event_df
+temp_event_df = data.frame(id = "A", DLNM_day = 1, date = as.Date("01/01/1900", "%m/%d/%y"))
+for(i in 1:nrow(DLNM_temp_event_df)){
+  dates_i = seq.Date(from = DLNM_temp_event_df[i, "DLNM_start_date"], to = DLNM_temp_event_df[i, "event_date"], by = 1)
+  temp_event_df = rbind(temp_event_df, data.frame(id = rep(DLNM_temp_event_df[i, "id"], length(dates_i)), DLNM_day = seq(0, length(dates_i) - 1, 1), date = dates_i))
+}
+temp_event_df = temp_event_df[-1,]
+
+temp_event_df <- merge(temp_event_df, chicagoNMMAPS[,c("date", "temp")], by.x = c("date"), by.y = c("date"))
+temp_event_df = temp_event_df[,c("id", "DLNM_day", "temp")]
+
+temp_event_df = reshape(temp_event_df, idvar = "id", timevar = "DLNM_day", v.names = "temp", direction = "wide")
+temp_event_df$outcome = TRUE
+temp_event_df$risk = rnorm(n = 750, mean = 2, sd = 1)
+
+DLNM_temp_no_event_df = temp_no_event_df
+temp_no_event_df = data.frame(id = "A", DLNM_day = 1, date = as.Date("01/01/1900", "%m/%d/%y"))
+for(i in 1:nrow(DLNM_temp_no_event_df)){
+  dates_i = seq.Date(from = DLNM_temp_no_event_df[i, "DLNM_start_date"], to = DLNM_temp_no_event_df[i, "event_date"], by = 1)
+  temp_no_event_df = rbind(temp_no_event_df, data.frame(id = rep(DLNM_temp_no_event_df[i, "id"], length(dates_i)), DLNM_day = seq(0, length(dates_i) - 1, 1), date = dates_i))
+}
+temp_no_event_df = temp_no_event_df[-1,]
+temp_no_event_df <- merge(temp_no_event_df, chicagoNMMAPS[,c("date", "temp")], by.x = c("date"), by.y = c("date"))
+temp_no_event_df = temp_no_event_df[,c("id", "DLNM_day", "temp")]
+
+temp_no_event_df = reshape(temp_no_event_df, idvar = "id", timevar = "DLNM_day", v.names = "temp", direction = "wide")
+
+temp_no_event_df$outcome = FALSE
+temp_no_event_df$risk = rnorm(n = 1000, mean = 0, sd = 1)
+
+DLNM_model_df = rbind(temp_event_df, temp_no_event_df)
+temp_data = DLNM_model_df[,c("temp.0", "temp.1", "temp.2", "temp.3", "temp.4", "temp.5", "temp.6", "temp.7")]
+temp_data = as.matrix(temp_data)
+```
+
+
+# Fit a DLNM
+
+```{r}
+head(temp_data)
+
+temp_data = temp_data[,rev(1:ncol(temp_data))] # reverse so columns are in lag order for DLNM
+# column 1 is lag 1 temperature, ...., column j is lag j temperature
+# "The matrix of exposure histories" https://cran.r-project.org/web/packages/dlnm/vignettes/dlnmExtended.pdf
+
+head(temp_data)
+```
+
+Median of the exposures will be used as centering value
+
+```{r}
+temp_median = round(median(as.vector(temp_data)), 1) # centering value (median)
+temp_median
+```
+
+```{r}
+# set up DLNM model parameters
+# predictor DLNM model parameters
+var_arg = list(fun = "bs", df = 4, degree = 3)
+# lag DLNM model parameters
+lag_arg = list(fun = "bs", df = 4, degree = 3)
+```
+
+```{r}
+# cross-basis matrix for DLNM
+# basis for the predictor and lag
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg)
+model = glm(formula = outcome ~ cb + risk, data = DLNM_model_df, family = "binomial"(link='logit')) # model with cross-basis matrix. outcome column name of outcome in DLNM_model_df. risk is an adjusting covariate
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+plot at specific exposure slice
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+
+plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile), ylim = c(0, 2))
+```
+
+plot at specific lag slice
+
+```{r}
+plot(cpred, "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2), ylim = c(-1, 7))
+```
+
+```{r}
+plot(cpred, ptype = "3d")
+```
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+print(paste0("Third Quartile: ", temp_third_quartile))
+allRR_thirdquantile = cbind(cpred$allRRlow[names(cpred$allRRlow) == temp_third_quartile], 
+                            cpred$allRRfit[names(cpred$allRRfit) == temp_third_quartile],
+                            cpred$allRRhigh[names(cpred$allRRhigh) == temp_third_quartile])
+colnames(allRR_thirdquantile) = c("allRR_low", "allRR", "allRR_high")
+allRR_thirdquantile
+```
+
+# Function to find best parameters for DLNM
+
+```{r}
+# function that does a grid search over DLNM parameters to find the best model
+
+args = list(list(fun = "bs", df = 4, degree = 2),
+            list(fun = "bs", df = 5, degree = 2),
+            list(fun = "bs", df = 4, degree = 3),
+            list(fun = "bs", df = 5, degree = 3))
+
+fit_DLNMs_glm = function(args_list, exposure_data, min_lag, max_lag, model_data, outcome, covars, glm_family, verbose = TRUE){
+  # function inputs
+  # args_list: list of DLNM parameters to try (list of lists)
+  # exposure_data: matrix of exposure history data. should be in reverse time order. first column exposure from last day, last column exposure from first day
+  # min_lag: numeric, minimum lag to use in DLNM
+  # max_lag: numeric: maximum lag to use in DLNM
+  # model_data: dataframe with all covariate data
+  # outcome: character string, the outcome column name
+  # covars: a vector of character strings, vector containing the column names of the adjusting covariates
+  # glm_family: character string, specifying the link function
+  # verbose: logical, indicates if best (lowest AIC) model parameters should be printed. default: TRUE
+  
+  # returns a named list containing a dataframe with the AIC of all the model parameter argument combinations for lag and variable;
+  # the DLNM model parameters used for the variable in the best model and then the DLNM model parameters used for the lag in the best model
+  # best model defined as model with lowest AIC
+  
+  num_args = length(args_list) # number of different DLNM model parameters
+  indices = seq(1, num_args, 1) # indices for the DLNM model parameters
+  combo_indices = cbind(t(matrix(rep(indices, 2), ncol = 2)), combn(indices, 2)) # all combinations of the DLNM model parameters. used by for-loop.
+  
+  AIC = rep(NA, ncol(combo_indices)) # initialize for AIC vector
+  smallest_AIC = Inf; smallest_AIC_i = NA # initialize, to store the smallest AIC value/ the index of DLNM argument combination that resulted in the smallest AIC
+  
+  return_df = data.frame(matrix(NA, nrow = ncol(combo_indices), ncol = 4)) # initialize dataframe to return with AIC and BIC
+  colnames(return_df) = c("DLNM_argvar", "DLNM_arglag", "AIC", "BIC")
+  
+  base_GLM_formula_str = paste(outcome, " ~ ", do.call(paste, c(as.list(covars), sep = " + ")), sep = "") # formula besides the cross basis, each for loop gets own crossbasis
+  
+  for(i in 1:ncol(combo_indices)){ # for all combinations of the DLNM model parameters
+    ind1 = combo_indices[1, i]; ind2 = combo_indices[2, i] # get the appropriate indices for DLNM model parameter for loop i
+    # cross-basis matrix for DLNM
+    cb = crossbasis(exposure_data, lag = c(min_lag, max_lag), argvar = args_list[[ind1]], arglag = args_list[[ind2]])
+    # model with crossbasis
+    model = glm(formula = update(as.formula(base_GLM_formula_str), ~ . + cb), data = model_data, family = glm_family)
+    AIC_i = AIC(model) # get i-th AIC
+    AIC[i] = AIC_i # fill in AIC vector
+    if(AIC_i < smallest_AIC){ # if the i-th AIC is the smallest so far, update smallest_AIC
+      smallest_AIC = AIC_i
+      smallest_AIC_i = i
+    }
+    # update returned data frame with AIC, BIC
+    return_df[i, "DLNM_argvar"] = paste(names(args_list[[ind1]]), args_list[[ind1]], sep = ":", collapse = ", ")
+    return_df[i, "DLNM_arglag"] = paste(names(args_list[[ind2]]), args_list[[ind2]], sep = ":", collapse = ", ")
+    return_df[i, "AIC"] = AIC_i
+    return_df[i, "BIC"] = BIC(model)
+  }
+  
+  if(verbose){ # print the best model parameters (best defined here as lowest AIC)
+    best_var_arg = combo_indices[1, smallest_AIC_i] # best model parameters for predictor/exposure
+    best_lag_arg = combo_indices[2, smallest_AIC_i] # best model parameters for lag
+    print(paste("var: ", paste(names(args_list[[best_var_arg]]), args_list[[best_var_arg]], sep = ": ", collapse = ", ")))
+    print(paste("lag: ", paste(names(args_list[[best_lag_arg]]), args_list[[best_lag_arg]], sep = ": ", collapse = ", ")))
+  }
+  return(list(results = return_df, 
+              minAIC_argvar = args_list[[combo_indices[1, smallest_AIC_i]]], 
+              minAIC_arglag = args_list[[combo_indices[2, smallest_AIC_i]]]))
+}
+```
+
+
+```{r}
+dlnm_result = fit_DLNMs_glm(args_list = args, exposure_data = temp_data, 
+                            min_lag = 1, max_lag = ncol(temp_data),
+                            model_data = DLNM_model_df, 
+                            outcome = "outcome", 
+                            covars = c("risk"),  
+                            glm_family = "binomial"(link='logit'))
+```
+
+```{r}
+dlnm_result$minAIC_argvar
+dlnm_result$minAIC_arglag
+```
+
+```{r}
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = dlnm_result$minAIC_argvar, arglag = dlnm_result$minAIC_arglag)
+model = glm(formula = outcome ~ cb + risk, data = DLNM_model_df, family = "binomial"(link='logit')) # 
+cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+plot at specific exposure slice
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+
+plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile), ylim = c(0, 2))
+```
+
+plot at specific lag slice
+
+```{r}
+plot(cpred, "slices", lag = 4, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 4), ylim = c(-1, 7))
+```
+
+```{r}
+plot(cpred, ptype = "3d")
+```
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+print(paste0("Third Quartile: ", temp_third_quartile))
+allRR_thirdquantile = cbind(cpred$allRRlow[names(cpred$allRRlow) == temp_third_quartile], 
+                            cpred$allRRfit[names(cpred$allRRfit) == temp_third_quartile],
+                            cpred$allRRhigh[names(cpred$allRRhigh) == temp_third_quartile])
+colnames(allRR_thirdquantile) = c("allRR_low", "allRR", "allRR_high")
+allRR_thirdquantile
+```
+
+# Function to find best parameters for DLNM: BIC
+
+```{r}
+# function that does a grid search over DLNM parameters to find the best model
+
+fit_DLNMs_glm = function(args_list, exposure_data, min_lag, max_lag, model_data, outcome, covars, glm_family, verbose = TRUE){
+  # function inputs
+  # args_list: list of DLNM parameters to try (list of lists)
+  # exposure_data: matrix of exposure history data. should be in reverse time order. first column exposure from last day, last column exposure from first day
+  # min_lag: numeric, minimum lag to use in DLNM
+  # max_lag: numeric: maximum lag to use in DLNM
+  # model_data: dataframe with all covariate data
+  # outcome: character string, the outcome column name
+  # covars: a vector of character strings, vector containing the column names of the adjusting covariates
+  # glm_family: character string, specifying the link function
+  # verbose: logical, indicates if best (lowest BIC) model parameters should be printed. default: TRUE
+  
+  # returns a named list containing a dataframe with the BIC of all the model parameter argument combinations for lag and variable;
+  # the DLNM model parameters used for the variable in the best model and then the DLNM model parameters used for the lag in the best model
+  # best model defined as model with lowest BIC
+  
+  num_args = length(args_list) # number of different DLNM model parameters
+  indices = seq(1, num_args, 1) # indices for the DLNM model parameters
+  combo_indices = cbind(t(matrix(rep(indices, 2), ncol = 2)), combn(indices, 2)) # all combinations of the DLNM model parameters. used by for-loop.
+  
+  BIC = rep(NA, ncol(combo_indices)) # initialize for BIC vector
+  smallest_BIC = Inf; smallest_BIC_i = NA # initialize, to store the smallest BIC value/ the index of DLNM argument combination that resulted in the smallest BIC
+  
+  return_df = data.frame(matrix(NA, nrow = ncol(combo_indices), ncol = 4)) # initialize dataframe to return with AIC and BIC
+  colnames(return_df) = c("DLNM_argvar", "DLNM_arglag", "AIC", "BIC")
+  
+  base_GLM_formula_str = paste(outcome, " ~ ", do.call(paste, c(as.list(covars), sep = " + ")), sep = "") # formula besides the cross basis, each for loop gets own crossbasis
+  
+  for(i in 1:ncol(combo_indices)){ # for all combinations of the DLNM model parameters
+    ind1 = combo_indices[1, i]; ind2 = combo_indices[2, i] # get the appropriate indices for DLNM model parameter for loop i
+    # cross-basis matrix for DLNM
+    cb = crossbasis(exposure_data, lag = c(min_lag, max_lag), argvar = args_list[[ind1]], arglag = args_list[[ind2]])
+    # model with crossbasis
+    model = glm(formula = update(as.formula(base_GLM_formula_str), ~ . + cb), data = model_data, family = glm_family)
+    BIC_i = BIC(model) # get i-th BIC
+    BIC[i] = BIC_i # fill in BIC vector
+    if(BIC_i < smallest_BIC){ # if the i-th BIC is the smallest so far, update smallest_AIC
+      smallest_BIC = BIC_i
+      smallest_BIC_i = i
+    }
+    # update returned data frame with AIC, BIC
+    return_df[i, "DLNM_argvar"] = paste(names(args_list[[ind1]]), args_list[[ind1]], sep = ":", collapse = ", ")
+    return_df[i, "DLNM_arglag"] = paste(names(args_list[[ind2]]), args_list[[ind2]], sep = ":", collapse = ", ")
+    return_df[i, "AIC"] = AIC(model)
+    return_df[i, "BIC"] = BIC_i
+  }
+  
+  if(verbose){ # print the best model parameters (best defined here as lowest AIC)
+    best_var_arg = combo_indices[1, smallest_BIC_i] # best model parameters for predictor/exposure
+    best_lag_arg = combo_indices[2, smallest_BIC_i] # best model parameters for lag
+    print(paste("var: ", paste(names(args_list[[best_var_arg]]), args_list[[best_var_arg]], sep = ": ", collapse = ", ")))
+    print(paste("lag: ", paste(names(args_list[[best_lag_arg]]), args_list[[best_lag_arg]], sep = ": ", collapse = ", ")))
+  }
+  return(list(results = return_df, 
+              minBIC_argvar = args_list[[combo_indices[1, smallest_BIC_i]]], 
+              minBIC_arglag = args_list[[combo_indices[2, smallest_BIC_i]]]))
+}
+```
+
+
+```{r}
+dlnm_result = fit_DLNMs_glm(args_list = args, exposure_data = temp_data, 
+                            min_lag = 1, max_lag = ncol(temp_data),
+                            model_data = DLNM_model_df, 
+                            outcome = "outcome", 
+                            covars = c("risk"),  
+                            glm_family = "binomial"(link='logit'))
+```
+
+```{r}
+dlnm_result$minBIC_argvar
+dlnm_result$minBIC_arglag
+```
+
+```{r}
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = dlnm_result$minBIC_argvar, arglag = dlnm_result$minBIC_arglag)
+model = glm(formula = outcome ~ cb + risk, data = DLNM_model_df, family = "binomial"(link='logit')) # 
+cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+plot at specific exposure slice
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+
+plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile, ", reference"), ylim = c(0, 2))
+```
+
+plot at specific lag slice
+
+```{r}
+plot(cpred, "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2), ylim = c(-1, 7))
+```
+
+```{r}
+plot(cpred, ptype = "3d")
+```
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+print(paste0("Third Quartile: ", temp_third_quartile))
+allRR_thirdquantile = cbind(cpred$allRRlow[names(cpred$allRRlow) == temp_third_quartile], 
+                            cpred$allRRfit[names(cpred$allRRfit) == temp_third_quartile],
+                            cpred$allRRhigh[names(cpred$allRRhigh) == temp_third_quartile])
+colnames(allRR_thirdquantile) = c("allRR_low", "allRR", "allRR_high")
+allRR_thirdquantile
+```
+
