@@ -14,6 +14,8 @@ library(here)
 library(tidyverse)
 library(ggridges)
 library(stargazer)
+library(forcats) # For reordering factor levels
+
 
 source(here("clean_stress_data.R")) # pss_recode and crisis_data and the output datasets of interest
 
@@ -23,55 +25,30 @@ source(here("explore_weather_data.R")) # wbgt_cascade and heat_averages are outp
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 ## Simplify the data
-pss_simple <- pss_recode %>% select(mstudyid, survey_datetime, PSS4, datdeliv:term_at_survey)
+pss_simple <- pss_recode %>% select(mstudyid, survey_datetime, PSS4, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
+  mutate(survey_date = as.Date(survey_datetime)) %>%  # Extract the date part of survey_datetime 
+  mutate(survey_pre_post_birth = fct_relevel(survey_pre_post_birth, "pre_delivery", "post_delivery")) %>%
+  
+  #focus on surveys before pregnancy 
+  filter(survey_pre_post_birth == "pre_delivery")
+
+
 
 crisis_simple <- crisis_data %>%
   mutate(
     quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
     quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
     survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
-    select(mstudyid, fin_events:survey_datetime, datdeliv:term_at_survey) %>%
-  select(-c(crireadneg:crikidneg))
+    select(mstudyid, fin_events:survey_datetime, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
+  select(-c(crireadneg:crikidneg, experienced_auth_neg:experienced_oth_neg)) %>%
+  mutate(survey_date = as.Date(survey_datetime))  # Extract the date part of survey_datetime
 
+
+# adjust community names cascade data to make sure they match with PSS
 wbgt_cascade_simple <- wbgt_cascade %>%
   select(community, time, twx) %>%
   mutate(community = str_remove(community, "_manual$"))
-
-
-
-# Define the periods you want to calculate (in months)
-prior_periods <- c(1, 2, 3)  # Specify months for which averages are calculated
-
-# Function to calculate average temperature for a given period
-calc_temp_avg <- function(pss_data, wbgt_data, period) {
-  pss_data %>%
-    rowwise() %>%
-    mutate(
-      !!paste0("avg_temp_", period, "_months_prior") := wbgt_data %>%
-        filter(
-          community == vname,  # Match community
-          time >= survey_date - (period * 30) & time < survey_date - ((period - 1) * 30)  # Dynamic range
-        ) %>%
-        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
-        pull(mean_temp)
-    ) %>%
-    ungroup()
-}
-
-# Start with survey_date column for convenience
-pss_simple <- pss_simple %>%
-  mutate(survey_date = as.Date(survey_datetime))
-
-# Apply calc_temp_avg for all prior periods and combine results
-result <- reduce(prior_periods, function(df, period) {
-  calc_temp_avg(df, wbgt_cascade_simple, period)
-}, .init = pss_simple)
-
-# View result
-print(result)
-
 ```
-
 
 
 
@@ -80,8 +57,52 @@ print(result)
 # Distribution analysis of pre and post PSS scores
 ggplot(pss_simple, aes(x = PSS4)) +
   geom_histogram(bins = 17, col = "black", fill = "steelblue") +
-  ggtitle("Perceived Stress Scores Follow a Normal Distribution") +
+  labs(x = "Perceived Stress Score (0-16)",
+       y = "Responses",
+       title = "Perceived Stress Scores Follow a Normal Distribution",
+       subtitle = paste0(nrow(pss_simple), " surveys conducted between ", min(pss_simple$survey_date, na.rm = TRUE), " and ", max(pss_simple$survey_date, na.rm = TRUE), ".")) +
   theme_minimal()
+
+# Distribution analysis of pre and post PSS scores
+
+# Calculate sample sizes, means, and standard deviations
+sample_stats <- pss_simple %>%
+  filter(!is.na(survey_pre_post_birth)) %>%
+  group_by(survey_pre_post_birth) %>%
+  summarise(
+    n = n(),
+    mean = mean(PSS4, na.rm = TRUE),
+    sd = sd(PSS4, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    stats_label = paste0("N = ", n, "\nMean = ", round(mean, 2), "\nSD = ", round(sd, 2))
+  )
+
+# Create the plot with sample sizes, means, and standard deviations added
+pss_simple %>%
+  filter(!is.na(survey_pre_post_birth)) %>%
+  ggplot(aes(x = PSS4)) +
+  geom_histogram(bins = 17, col = "black", fill = "steelblue") +
+  geom_text(
+    data = sample_stats,
+    aes(x = 12, y = 70, label = stats_label),
+    vjust = 1.5, inherit.aes = FALSE
+  ) +
+  labs(
+    x = "Perceived Stress Score (0-16)",
+    y = "Responses",
+    title = "Distribution of PSS Appears Similar Pre/Post Delivery"
+  ) +
+  theme_minimal() +
+  facet_wrap(
+    ~survey_pre_post_birth,
+    labeller = labeller(survey_pre_post_birth = c(
+      "pre_delivery" = "Pre-Delivery",
+      "post_delivery" = "Post-Delivery"
+    ))
+  ) 
+
 ```
 
 ## Distributions of Crisis Data 
@@ -122,7 +143,10 @@ ggplot(events_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
   labs(
     title = "Total number of events that occurred regardless of emotional response",
     x = "Domain",
-    y = "Count of Events"
+    y = "Count of Events",
+    subtitle = paste0(nrow(crisis_simple), " surveys conducted between ", 
+                      min(crisis_simple$survey_date, na.rm = TRUE), " and ", 
+                      max(crisis_simple$survey_date, na.rm = TRUE), ".")
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -134,14 +158,14 @@ ggplot(events_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
 neg_columns <- crisis_simple %>%
   select(ends_with("neg"))
 
-neg_summary <- colSums(neg_columns)
+# Count occurrences of numeric values in each column
+neg_summary <- sapply(neg_columns, function(col) sum(as.numeric(col), na.rm = TRUE))
 
 # Convert to a data frame for plotting
 neg_summary_df <- data.frame(
   Domain = names(neg_summary),
   Count = neg_summary
 )
-
 
 neg_event_labels <- c(
   crifinneg = "Financial", 
@@ -157,7 +181,6 @@ neg_event_labels <- c(
   criauthneg = "Authority", 
   criothneg = "Other"
 )
-
 
 # Plot with the updated labels
 ggplot(neg_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
@@ -179,8 +202,8 @@ nds_columns <- crisis_simple %>%
   select(ends_with("nds")) %>%
   select(-sum_nds)
 
-# Summarize by calculating the total count of '1's in each `nds` column
-nds_summary <- colSums(nds_columns)
+# Count occurrences of numeric values in each column
+nds_summary <- sapply(nds_columns, function(col) sum(as.numeric(col), na.rm = TRUE))
 
 # Convert to a data frame for plotting
 nds_summary_df <- data.frame(
@@ -203,7 +226,6 @@ nds_labels <- c(
   oth_nds = "Other"
 )
 
-
 ggplot(nds_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
   geom_bar(stat = "identity") +
   scale_x_discrete(labels = nds_labels) +
@@ -219,75 +241,9 @@ ggplot(nds_summary_df, aes(x = reorder(Domain, -Count), y = Count)) +
 ## Distribution of NDS for Each Category
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
-# # Reshape data for ggplot with counts for 0 and 1
-# domain_data <- crisis_data %>%
-#   select(fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, neighsf_nds, 
-#          medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
-#   pivot_longer(cols = everything(), names_to = "domain", values_to = "valence_score") %>%
-#   group_by(domain, valence_score) %>%
-#   summarise(Count = n(), .groups = 'drop') %>%
-#   ungroup() %>%
-#   mutate(domain = recode(domain,
-#                          fin_nds = "Financial", 
-#                          leg_nds = "Legal", 
-#                          car_nds = "Career", 
-#                          rel_nds = "Relationship", 
-#                          homesf_nds = "Home safety", 
-#                          neighsf_nds = "Neighborhood safety", 
-#                          medself_nds = "Self medical", 
-#                          medoth_nds = "Other medical", 
-#                          home_nds = "Home", 
-#                          prej_nds = "Prejudice", 
-#                          auth_nds = "Authority", 
-#                          oth_nds = "Other"))
-# 
-# # Bar plots for each domain with geom_col
-# ggplot(domain_data, aes(x = valence_score, y = Count)) +
-#   geom_col(color = "black", fill = "steelblue", alpha = 1) +
-#   facet_wrap(~domain) +
-#   theme_minimal() +
-#   labs(title = "Distribution of Valence Scores Across Domains", x = "Event Valence Score", y = "Count")
-
-
-
-negative_event_data <- crisis_data %>%
-  select(mstudyid, fin_events, leg_events, car_events, rel_events, homesf_events, 
-         neighsf_events, medself_events, medoth_events, home_events, prej_events, 
-         auth_events, oth_events, fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, 
-         neighsf_nds, medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
-  mutate(
-    experienced_auth_neg = ifelse(auth_events > 0, 1, 0),
-    experienced_fin_neg = ifelse(fin_events > 0, 1, 0),
-    experienced_leg_neg = ifelse(leg_events > 0, 1, 0),
-    experienced_car_neg = ifelse(car_events > 0, 1, 0),
-    experienced_rel_neg = ifelse(rel_events > 0, 1, 0),
-    experienced_homesf_neg = ifelse(homesf_events > 0, 1, 0),
-    experienced_neighsf_neg = ifelse(neighsf_events > 0, 1, 0),
-    experienced_medself_neg = ifelse(medself_events > 0, 1, 0),
-    experienced_medoth_neg = ifelse(medoth_events > 0, 1, 0),
-    experienced_home_neg = ifelse(home_events > 0, 1, 0),
-    experienced_prej_neg = ifelse(prej_events > 0, 1, 0),
-    experienced_oth_neg = ifelse(oth_events > 0, 1, 0)
-  ) %>%
-  mutate(
-    auth_nds = ifelse(experienced_auth_neg == 1, auth_nds, NA),
-    fin_nds = ifelse(experienced_fin_neg == 1, fin_nds, NA),
-    leg_nds = ifelse(experienced_leg_neg == 1, leg_nds, NA),
-    car_nds = ifelse(experienced_car_neg == 1, car_nds, NA),
-    rel_nds = ifelse(experienced_rel_neg == 1, rel_nds, NA),
-    homesf_nds = ifelse(experienced_homesf_neg == 1, homesf_nds, NA),
-    neighsf_nds = ifelse(experienced_neighsf_neg == 1, neighsf_nds, NA),
-    medself_nds = ifelse(experienced_medself_neg == 1, medself_nds, NA),
-    medoth_nds = ifelse(experienced_medoth_neg == 1, medoth_nds, NA),
-    home_nds = ifelse(experienced_home_neg == 1, home_nds, NA),
-    prej_nds = ifelse(experienced_prej_neg == 1, prej_nds, NA),
-    oth_nds = ifelse(experienced_oth_neg == 1, oth_nds, NA)
-  )
-
-
 
 # Reshape data for ggplot with counts for 0 and 1 in the new dataset
-domain_data <- negative_event_data %>%
+domain_data <- crisis_data %>%
   select(fin_nds, leg_nds, car_nds, rel_nds, homesf_nds, neighsf_nds, 
          medself_nds, medoth_nds, home_nds, prej_nds, auth_nds, oth_nds) %>%
   pivot_longer(cols = everything(), names_to = "domain", values_to = "valence_score") %>%
@@ -295,6 +251,7 @@ domain_data <- negative_event_data %>%
   group_by(domain, valence_score) %>%
   summarise(Count = n(), .groups = 'drop') %>%
   ungroup() %>%
+  filter(valence_score != "No Event") %>%
   mutate(domain = recode(domain,
                          fin_nds = "Financial", 
                          leg_nds = "Legal", 
@@ -314,7 +271,7 @@ ggplot(domain_data, aes(x = valence_score, y = Count)) +
   geom_col(color = "black", fill = "steelblue", alpha = 1) +
   facet_wrap(~ domain) +
   theme_minimal() +
-  labs(title = "Distribution of Valence Scores Across Domains (If Event Occurred)", x = "Event Valence Score", y = "Count")
+  labs(title = "Distribution of Valence Scores Across Domains (If Event Occurred)", x = "Event Valence Score (1 = Negative Valenced Experienced)", y = "Count")
 
 
 
@@ -340,10 +297,278 @@ ggplot(nds_count_data, aes(x = sum_nds, y = n)) +
   geom_text(aes(label = n), vjust = -0.5) +
   theme_minimal() +
   labs(title = "Distribution of Sum NDS", x = "Sum NDS", y = "Count")
+```
+
+
+# Temperature Distributions 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+temp_boxplot_ordered_data <- wbgt_cascade_simple %>%
+  mutate(community = fct_reorder(community, twx, .fun = median, na.rm = TRUE))
+
+ggplot(temp_boxplot_ordered_data, aes(x = community, y = twx)) +
+  geom_boxplot() +
+  labs(
+    title = "Boxplot of TWX by Community (Ordered by Median TWX)",
+    x = "Community",
+    y = "TWX"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+
+
+
+
+
+
+
+# Combining Temp Data with Stress/Crisis Data
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Define the periods for which we want to calculate average temperatures (in months)
+prior_periods <- c(1, 2, 3, 4, 5, 6)
+
+# Function to calculate average temperature for a specific period
+calc_monthly_temp_avg <- function(stress_data, wbgt_data, period) {
+  stress_data %>%
+    rowwise() %>%  # Perform operations for each row (unique survey observation)
+    mutate(
+      !!paste0("avg_temp_", period, "_months_prior") := wbgt_data %>%  # Create a dynamic column name
+        filter(
+          community == vname,  # Match the community where the participant resides
+          time >= survey_date - (period * 30) & time < survey_date - ((period - 1) * 30)  # Filter by dynamic date range
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%  # Calculate mean temperature, ignoring NA values
+        pull(mean_temp)  # Extract the result as a scalar
+    ) %>%
+    ungroup()  # Remove row-wise grouping
+}
+
+
+calc_custom_temp_avg <- function(stress_data, wbgt_data) {
+  stress_data %>%
+    rowwise() %>%  # Perform operations for each row (unique survey observation)
+    mutate(
+      # Temperature on the day of the survey
+      avg_temp_day_of_survey = wbgt_data %>%
+        filter(community == vname, time == survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Temperature the day before the survey
+      avg_temp_day_before_survey = wbgt_data %>%
+        filter(community == vname, time == survey_date - 1) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the week before the survey
+      avg_temp_week_before_survey = wbgt_data %>%
+        filter(community == vname, time >= survey_date - 7 & time < survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 3 months before the survey
+      avg_temp_3_months_before = wbgt_data %>%
+        filter(community == vname, time >= survey_date - 90 & time < survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 6 months before the survey
+      avg_temp_6_months_before = wbgt_data %>%
+        filter(community == vname, time >= survey_date - 180 & time < survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      ## TRIMESTER TEMP CALCULATIONS
+      # Estimate conception date (280 days before delivery)
+      
+      # Use gestational age if available, otherwise default to 280 - medical average (not our average) gestation period 
+      gestage_days = ifelse(is.na(gestage_days), 280, gestage_days),
+      
+      # Calculate conception date based on gestational age
+      conception_date = datdeliv - gestage_days,
+  
+      # Pre-conception temperature average (60 days before conception)
+      avg_temp_pre_conception = wbgt_data %>%
+        filter(
+          community == vname,
+          time >= conception_date - 60 & time < conception_date
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # First trimester temperature average
+      avg_temp_first_trimester = wbgt_data %>%
+        filter(
+          community == vname,
+          time >= conception_date & time < conception_date + 90
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Second trimester temperature average
+      avg_temp_second_trimester = wbgt_data %>%
+        filter(
+          community == vname,
+          time >= conception_date + 91 & time < conception_date + 180
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Third trimester temperature average
+      avg_temp_third_trimester = wbgt_data %>%
+        filter(
+          community == vname,
+          time >= conception_date + 181 & time <= datdeliv
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+     
+       # Average temperature across the entire pregnancy
+      avg_temp_entire_pregnancy = wbgt_data %>%
+        filter(
+          community == vname,  
+          time >= conception_date & time <= datdeliv  # Filter pregnancy period estimated as 280 days before delivery
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp)  
+      
+    ) %>%
+    ungroup()  # Remove row-wise grouping
+}
+
+
+# # Start with the initial dataset
+# pss_simple_temp_lags <- pss_simple
+# 
+# # Loop through each period in prior_periods
+# for (period in prior_periods) {
+#   # Add a new column for the current period
+#   pss_simple_temp_lags <- calc_monthly_temp_avg(pss_simple_temp_lags, wbgt_cascade_simple, period)
+# }
+
+
+# Automate the calculation of average temperatures for all prior periods
+pss_simple_temp_lags <- reduce(prior_periods, function(df, period) {
+  calc_monthly_temp_avg(df, wbgt_cascade_simple, period)  # Apply the calculation for each period
+}, .init = pss_simple)  # Start with the initial dataset (pss_simple)
+
+
+# Add custom periods
+pss_simple_final <- calc_custom_temp_avg(pss_simple_temp_lags, wbgt_cascade_simple)
+
+
+# Automate the calculation of average temperatures for all prior periods
+crisis_simple_temp_lags <- reduce(prior_periods, function(df, period) {
+  calc_monthly_temp_avg(df, wbgt_cascade_simple, period)  # Apply the calculation for each period
+}, .init = crisis_simple)  # Start with the initial dataset (crisis_simple)
+
+crisis_simple_final <- calc_custom_temp_avg(crisis_simple_temp_lags, wbgt_cascade_simple)
+
+```
+
+
+
+# Unadjusted regressions
+
+```{r}
+
+## NEED TO REDO USING GESTATION COVARIATES 
+
+## Looking at pregancy values again 
+
+summary(lm(PSS4 ~ avg_temp_entire_pregnancy, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_pre_conception, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_first_trimester, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_second_trimester, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_third_trimester, data = pss_simple_final))
+
+summary(lm(total_negative_responses ~ avg_temp_entire_pregnancy, data = crisis_simple_final))
+summary(lm(total_negative_responses ~ avg_temp_pre_conception, data = crisis_simple_final))
+summary(lm(total_negative_responses ~ avg_temp_first_trimester, data = crisis_simple_final))
+summary(lm(total_negative_responses ~ avg_temp_second_trimester, data = crisis_simple_final))
+summary(lm(total_negative_responses ~ avg_temp_third_trimester, data = crisis_simple_final))
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+wbgt_models_pss <- list(
+  lm(PSS4 ~ avg_temp_day_of_survey, data = pss_simple_final),
+  lm(PSS4 ~ avg_temp_day_before_survey, data = pss_simple_final),
+  lm(PSS4 ~ avg_temp_week_before_survey, data = pss_simple_final),
+  lm(PSS4 ~ avg_temp_1_months_prior, data = pss_simple_final),
+  lm(PSS4 ~ avg_temp_3_months_before, data = pss_simple_final),
+  lm(PSS4 ~ avg_temp_6_months_before, data = pss_simple_final)
+)
+
+# Display model summaries in a single compact table
+stargazer(wbgt_models_pss, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
+          column.labels = c("Day Of", 
+                            "Day Prior", 
+                            "Week Prior", 
+                            "Month Prior", 
+                            "3 Months Prior ",
+                            "6 Months Prior"),
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
+
+
+
+wbgt_models_crisis <- list(
+  lm(total_negative_responses ~ avg_temp_day_of_survey, data = crisis_simple_final),
+  lm(total_negative_responses ~ avg_temp_day_before_survey, data = crisis_simple_final),
+  lm(total_negative_responses ~ avg_temp_week_before_survey, data = crisis_simple_final),
+  lm(total_negative_responses ~ avg_temp_1_months_prior, data = crisis_simple_final),
+  lm(total_negative_responses ~ avg_temp_3_months_before, data = crisis_simple_final),
+  lm(total_negative_responses ~ avg_temp_6_months_before, data = crisis_simple_final)
+)
+
+# Display model summaries in a single compact table
+stargazer(wbgt_models_crisis, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
+           column.labels = c("Day Of", 
+                            "Day Prior", 
+                            "Week Prior", 
+                            "Month Prior", 
+                            "3 Months Prior ",
+                            "6 Months Prior"),
+          dep.var.labels = "Total Negative Responses", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2)
 
 
 ```
 
+## Regressions with covariates 
+
+```{r}
+summary(lm(PSS4 ~ avg_temp_entire_pregnancy + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_pre_conception + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_first_trimester + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_second_trimester + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_third_trimester + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+
+
+summary(lm(PSS4 ~ avg_temp_day_of_survey + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_day_before_survey + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_week_before_survey + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_1_months_prior + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_3_months_before + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+summary(lm(PSS4 ~ avg_temp_6_months_before + married + age + wealthindex + medlev + fan + pregchn, data = pss_simple_final))
+
+```
+
+
+
+
+
+
+
+# ---------------- ARCHIVE -----------------
 
 ## Distributions of Heat Data
 

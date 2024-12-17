@@ -17,6 +17,11 @@ delivery_date <- read_csv(here("data", "GRAPHS_datdeliv_vname.csv"))
 # Importing data from Excel ----
 stress_NLE <- read_dta(here("data", "Stress_NLE.dta"))
 
+# acquire length of gestational period
+NLE_covariates <- stress_NLE %>%
+  select(mstudyid, GESTAGE_DAYS, married, wealthindex, age, medlev, fan, pregchn) %>%
+  rename(gestage_days = GESTAGE_DAYS)
+
 crisis_data <- read_excel(here("data", "CAL_stress.xlsx"), sheet = "Crisis")
 stress_data <- read_excel(here("data", "CAL_stress.xlsx"), sheet = "Pss")
 
@@ -64,25 +69,37 @@ pss_recode <- pss_clean %>%
       diffdays < -189 & diffdays >= -280 ~ "first_trimester",
       diffdays < -280 ~ "pre_conception"
     )
-  )
+  ) %>%
+  
+  # ## ASSUMPTION: If questionnaire date and delivery date are the same, assuming participant responded to survey before going into labor
+  mutate(survey_pre_post_birth = ifelse(diffdays > 0, "post_delivery", "pre_delivery")) %>%
+  
+  # Add in gestation period
+  left_join(NLE_covariates) 
+
 
 
 
 # Developing NLE score ----
 crisis_data <- crisis_data %>%
+  
+  # replace 3 with NA to reflect what skip logic would have done
+  # mutate(across(matches("^b\\d+$"), ~ replace(., . == 3, NA))) %>%
 
   # Calculate negative perception counts based on "b" columns
+  
+  # CHANGES FROM SAS CODE: REMOVED A1, A4, A72 as positive events
   mutate(
-    fin_events = rowSums(select(., a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a14) == 1, na.rm = TRUE),
-    crifinneg = rowSums(select(., b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b14) == 1, na.rm = TRUE),
+    fin_events = rowSums(select(., a2, a3, a5, a6, a7, a8, a9, a10, a11, a12, a14) == 1, na.rm = TRUE),
+    crifinneg = rowSums(select(., b2, b3, b5, b6, b7, b8, b9, b10, b11, b12, b14) == 1, na.rm = TRUE),
     fin_nds = ifelse(crifinneg > 0, 1, 0),
     
     leg_events = rowSums(select(., a15, a16, a17, a18, a19) == 1, na.rm = TRUE),
     crilegalneg = rowSums(select(., b15, b16, b17, b18, b19) == 1, na.rm = TRUE),
     leg_nds = ifelse(crilegalneg > 0, 1, 0),
     
-    car_events = rowSums(select(., a27, a72, a73, a75) == 1, na.rm = TRUE),
-    cricareerneg = rowSums(select(., b27, b72, b73, b75) == 1, na.rm = TRUE),
+    car_events = rowSums(select(., a27, a73, a75) == 1, na.rm = TRUE),
+    cricareerneg = rowSums(select(., b27, b73, b75) == 1, na.rm = TRUE),
     car_nds = ifelse(cricareerneg > 0, 1, 0),
     
     rel_events = rowSums(select(., a20, a21, a22, a24, a29, a30, a31, a32, a33, a34, a35, a36, a37) == 1, na.rm = TRUE),
@@ -143,12 +160,63 @@ crisis_data <- crisis_data %>%
                                        na.rm = TRUE)
   ) %>%
   
+  # whether event was experienced 
+  mutate(
+    experienced_auth = ifelse(auth_events > 0, 1, 0),
+    experienced_fin = ifelse(fin_events > 0, 1, 0),
+    experienced_leg = ifelse(leg_events > 0, 1, 0),
+    experienced_car = ifelse(car_events > 0, 1, 0),
+    experienced_rel = ifelse(rel_events > 0, 1, 0),
+    experienced_homesf = ifelse(homesf_events > 0, 1, 0),
+    experienced_neighsf = ifelse(neighsf_events > 0, 1, 0),
+    experienced_medself = ifelse(medself_events > 0, 1, 0),
+    experienced_medoth = ifelse(medoth_events > 0, 1, 0),
+    experienced_home = ifelse(home_events > 0, 1, 0),
+    experienced_prej = ifelse(prej_events > 0, 1, 0),
+    experienced_oth = ifelse(oth_events > 0, 1, 0)
+  ) %>%
+  
+  # Change NDS to no event if no event in the domain was experienced (essentially add NA for negative event if event didn't occur)
+  mutate(
+    auth_nds = ifelse(experienced_auth == 1, auth_nds, "No Event"),
+    fin_nds = ifelse(experienced_fin == 1, fin_nds, "No Event"),
+    leg_nds = ifelse(experienced_leg == 1, leg_nds, "No Event"),
+    car_nds = ifelse(experienced_car == 1, car_nds, "No Event"),
+    rel_nds = ifelse(experienced_rel == 1, rel_nds, "No Event"),
+    homesf_nds = ifelse(experienced_homesf == 1, homesf_nds, "No Event"),
+    neighsf_nds = ifelse(experienced_neighsf == 1, neighsf_nds, "No Event"),
+    medself_nds = ifelse(experienced_medself == 1, medself_nds, "No Event"),
+    medoth_nds = ifelse(experienced_medoth == 1, medoth_nds, "No Event"),
+    home_nds = ifelse(experienced_home == 1, home_nds, "No Event"),
+    prej_nds = ifelse(experienced_prej == 1, prej_nds, "No Event"),
+    oth_nds = ifelse(experienced_oth == 1, oth_nds, "No Event")
+  ) %>%
+  
+  # change #negative events expeirenced to "no event" if no event in the domain was experienced 
+  mutate(
+    criauthneg = ifelse(experienced_auth == 1, criauthneg, "No Event"),
+    crifinneg = ifelse(experienced_fin == 1, crifinneg, "No Event"),
+    crilegalneg = ifelse(experienced_leg == 1, crilegalneg, "No Event"),
+    cricareerneg = ifelse(experienced_car == 1, cricareerneg, "No Event"),
+    crirelneg = ifelse(experienced_rel == 1, crirelneg, "No Event"),
+    crihomesafeneg = ifelse(experienced_homesf == 1, crihomesafeneg, "No Event"),
+    crineighsafeneg = ifelse(experienced_neighsf == 1, crineighsafeneg, "No Event"),
+    crimedselfneg = ifelse(experienced_medself == 1, crimedselfneg, "No Event"),
+    crimedothneg = ifelse(experienced_medoth == 1, crimedothneg, "No Event"),
+    crihomeneg = ifelse(experienced_home == 1, crihomeneg, "No Event"),
+    criprejneg = ifelse(experienced_prej == 1, criprejneg, "No Event"),
+    criothneg = ifelse(experienced_oth == 1, criothneg, "No Event")
+  ) %>%
+
   mutate(
     # Resilience score based on total events and total negative responses
     resilience_score = ifelse(total_events > 0, 1 - (total_negative_responses / total_events), NA)
   ) %>%
+  
   left_join(delivery_date) %>% 
+  
   mutate(diffdays = difftime(datdeliv, quessetd, units = "days")) %>%
+  
   mutate(
     term_at_survey = case_when(
       diffdays > 42 ~ "far_postnatal",
@@ -158,7 +226,15 @@ crisis_data <- crisis_data %>%
       diffdays < -189 & diffdays >= -280 ~ "first_trimester",
       diffdays < -280 ~ "pre_conception"
     )
-  )
+  ) %>%
+  
+  # ## ASSUMPTION: If questionnaire date and delivery date are the same, assuming participant responded to survey before going into labor
+  mutate(survey_pre_post_birth = ifelse(diffdays > 0, "post_delivery", "pre_delivery"))  %>%
+  
+  # Add in gestation period
+  left_join(NLE_covariates)
+  
+  
 
 # Setting up labels for clarity
 var_label(crisis_data$criauthneg) <- "Sum of prehome authority negative events"

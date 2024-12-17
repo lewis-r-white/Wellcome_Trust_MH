@@ -1,0 +1,248 @@
+---
+title: "Distributed Lag Model"
+output: html_document
+date: "2024-12-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+## Load in the packages 
+library(here)
+library(tidyverse)
+library(ggridges)
+library(stargazer)
+library(forcats) # For reordering factor levels
+library(dlnm)
+library(data.table)
+
+
+## Source in the stress and the weather data 
+
+# stress data
+source(here("clean_stress_data.R")) # pss_recode and crisis_data and the output datasets of interest
+
+# weather data 
+source(here("explore_weather_data.R")) # wbgt_cascade and heat_averages are outputs of interest 
+```
+
+### Simplify data
+```{r}
+## Simplify the data
+pss_simple <- pss_recode %>% 
+  select(mstudyid, survey_datetime, PSS4, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>% # select variables of interest 
+  mutate(survey_date = as.Date(survey_datetime)) %>%  # Extract the date part of survey_datetime 
+  mutate(survey_pre_post_birth = fct_relevel(survey_pre_post_birth, "pre_delivery", "post_delivery"))
+
+crisis_simple <- crisis_data %>%
+  mutate(
+    quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
+    quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
+    survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
+    select(mstudyid, fin_events:survey_datetime, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
+  select(-c(crireadneg:crikidneg, experienced_auth:experienced_oth)) %>%
+  mutate(survey_date = as.Date(survey_datetime))  # Extract the date part of survey_datetime
+
+
+# adjust community names cascade data to make sure they match with PSS
+wbgt_cascade_simple <- wbgt_cascade %>%
+  select(community, time, twx) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+```
+
+### prep data by obtaining daily lags
+
+```{r}
+# Create a sequence of dates for each survey date with lags
+temperature_lags <- pss_simple %>%
+  filter(diffdays < 0) %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 7) %>%  # Define the start of the window
+  rowwise() %>%
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # Create a list of dates for each survey
+  unnest(lag_dates) %>%  # Expand rows for each date in the range
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(wbgt_cascade_simple, by = c("vname" = "community", "date" = "time"))
+
+```
+
+
+```{r}
+# Create a sequence of dates for each survey date with 7-day lags
+temperature_lags <- pss_simple %>%
+  filter(diffdays < 0) %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 7) %>%  # Define the start of the 7-day window
+  rowwise() %>%
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # Create a list of dates for each survey
+  unnest(lag_dates) %>%  # Expand rows for each date in the 7-day range
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(wbgt_cascade_simple, by = c("vname" = "community", "date" = "time"))
+
+# Convert datasets to data.table
+setDT(temperature_lags)
+setDT(pss_simple)
+
+# make lag columns 
+data_combined <- dcast(
+  temperature_lags,
+  mstudyid + survey_date ~ as.numeric(survey_date - date),  # Use lag as column name
+  value.var = "twx",
+  fill = NA,  # Fill missing values with NA
+  fun.aggregate = mean  # In case of duplicates, take the mean
+)
+
+
+# Rename columns to match the `temp_lag_` format
+setnames(data_combined, old = names(data_combined)[3:ncol(data_combined)], 
+         new = paste0("temp_lag_", 0:(ncol(data_combined) - 3)))
+
+
+data_combined <- merge(data_combined, pss_simple[, .(mstudyid, survey_date, PSS4)], 
+                       by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0))
+
+
+temp_data <- data_combined %>% select(temp_lag_0:temp_lag_7) %>%
+  as.matrix()
+
+```
+
+
+Median of the exposures will be used as centering value
+
+```{r}
+temp_median = round(median(as.vector(temp_data)), 1) # centering value (median)
+temp_median
+```
+
+```{r}
+# set up DLNM model parameters
+# predictor DLNM model parameters
+var_arg = list(fun = "bs", df = 4, degree = 3)
+# lag DLNM model parameters
+lag_arg = list(fun = "bs", df = 4, degree = 3)
+```
+
+
+
+```{r}
+
+# cross-basis matrix for DLNM
+# basis for the predictor and lag
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg)
+
+
+model = glm(formula = PSS4 ~ cb, data = data_combined, family = "gaussian") # model with cross-basis matrix. outcome column name of outcome in DLNM_model_df. risk is an adjusting covariate
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+
+```
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+
+plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3, cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile), ylim = c(0, 2))
+```
+
+
+```{r}
+plot(cpred, "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2), ylim = c(-1, 7))
+```
+
+```{r}
+plot(cpred, ptype = "3d")
+```
+
+
+
+
+```{r}
+
+# Define the crossbasis for temperature with 30 lags
+temp_lag <- crossbasis(data_combined$temp_lag_0, lag = 271,  ## use temp matrix instead 
+                       argvar = list(fun = "lin"),  # Linear relationship with temperature
+                       arglag = list(fun = "ns", df = 3))  # Natural spline for lag structure
+
+# Fit the Distributed Lag Model
+dlm_model <- glm(PSS4 ~ temp_lag, data = data_combined, family = gaussian)
+
+# Summarize the model
+summary(dlm_model)
+
+BIC(dlm_model)
+
+# Create predictions
+pred <- crosspred(temp_lag, dlm_model, cen = 0, at = seq(15, 30, by = 1)) # use median temp for centering
+
+summary(pred)
+
+# Plot
+plot(pred, ci = "area", main = "Lag-Response Relationship")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+library(dlnm)
+
+head(chicagoNMMAPS,3)
+
+cb1.pm <- crossbasis(chicagoNMMAPS$pm10, lag=15, argvar=list(fun="lin"), arglag=list(fun="poly",degree=4))
+summary(cb1.pm)
+
+cb1.temp <- crossbasis(chicagoNMMAPS$temp, lag=3, argvar=list(df=5), arglag=list(fun="strata",breaks=1))
+summary(cb1.temp)
+
+library(splines)
+
+model1 <- glm(death ~ cb1.pm + cb1.temp + ns(time, 7*14) + dow, family=quasipoisson(), chicagoNMMAPS)
+
+pred1.pm <- crosspred(cb1.pm, model1, at=0:20, bylag=0.2, cumul=TRUE)
+
+plot(pred1.pm, "slices", var=10, col=3, ylab="RR", ci.arg=list(density=15,lwd=2),
+main="Association with a 10-unit increase in PM10")
+
+plot(pred1.pm, "slices", var=10, col=2, cumul=TRUE, ylab="Cumulative RR",
+main="Cumulative association with a 10-unit increase in PM10")
+```
+

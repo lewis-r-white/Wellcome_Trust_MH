@@ -1,0 +1,40 @@
+# Load necessary libraries
+library(readxl)     # reading Excel files
+library(tidyverse)      # data manipulation
+library(labelled)   # labeling columns 
+library(here) # file paths
+library(haven)
+
+# Load Cascade's Tw data and and filter to general period of interest ----
+wbgt_cascade <- read_csv(here("data", "Ghana-Tw-Extract.csv")) %>% 
+  filter(time > as.Date("2013-01-01"),                             
+         time < as.Date("2016-01-01"))                             
+
+# # or load in pre-filtered data:
+# wbgt_cascade <- read_csv(here("data", "wbgt_cascade_2013_to_2015.csv"))
+
+# Load delivery date information ----
+delivery_date <- read_csv(here("data", "GRAPHS_datdeliv_vname.csv")) 
+
+# Load WBGT graphs data and join with delivery date ----
+wbgt_graphs <- read_csv(here("data", "WBGT_GRAPHS_pregnancy_and60dayspreconception_wide.csv")) %>% 
+  left_join(delivery_date) %>%                                      
+  select(mstudyid, datdeliv, pregnancy_result, vname, everything()) 
+
+# Extract the last non-NA WBGT temperature (delivery temperature) ----
+graphs_delivery_temps <- wbgt_graphs %>%
+  rowwise() %>% # Perform operations at row level                                                
+  mutate(delivery_temp = last(na.omit(c_across(starts_with("WBGT_temp"))))) %>%  # Identify the last non-NA value across columns starting with "WBGT_temp"
+  ungroup() %>%                                                     
+  select(mstudyid, datdeliv, vname, delivery_temp)                
+
+# Join delivery temperature data with WBGT cascade ----
+graphs_delivery_temps_with_twx <- graphs_delivery_temps %>%
+  left_join(                                                       
+    wbgt_cascade,                                                   
+    by = c("datdeliv" = "time", "vname" = "community")              
+  ) %>%
+  select(mstudyid, datdeliv, vname, delivery_temp, twx) 
+
+# View the resulting data ----
+graphs_delivery_temps_with_twx  
