@@ -31,12 +31,13 @@ source(here("explore_weather_data.R")) # wbgt_cascade and heat_averages are outp
 
 ### Simplify data
 ```{r}
-## Simplify the data
+## PSS data
 pss_simple <- pss_recode %>% 
   select(mstudyid, survey_datetime, PSS4, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>% # select variables of interest 
   mutate(survey_date = as.Date(survey_datetime)) %>%  # Extract the date part of survey_datetime 
   mutate(survey_pre_post_birth = fct_relevel(survey_pre_post_birth, "pre_delivery", "post_delivery"))
 
+## CRYSIS data
 crisis_simple <- crisis_data %>%
   mutate(
     quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
@@ -58,7 +59,7 @@ wbgt_cascade_simple <- wbgt_cascade %>%
 ### prep data by obtaining daily lags
 
 ```{r}
-# Create a sequence of dates for each survey date with lags
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
 temperature_lags <- pss_simple %>%
   filter(diffdays < 0) %>%
   select(mstudyid, vname, survey_date) %>%
@@ -71,28 +72,11 @@ temperature_lags <- pss_simple %>%
 # Join with temperature data 
   left_join(wbgt_cascade_simple, by = c("vname" = "community", "date" = "time"))
 
-```
-
-
-```{r}
-# Create a sequence of dates for each survey date with 7-day lags
-temperature_lags <- pss_simple %>%
-  filter(diffdays < 0) %>%
-  select(mstudyid, vname, survey_date) %>%
-  mutate(start_date = survey_date - 7) %>%  # Define the start of the 7-day window
-  rowwise() %>%
-  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # Create a list of dates for each survey
-  unnest(lag_dates) %>%  # Expand rows for each date in the 7-day range
-  rename(date = lag_dates) %>%
-
-# Join with temperature data 
-  left_join(wbgt_cascade_simple, by = c("vname" = "community", "date" = "time"))
-
-# Convert datasets to data.table
+# Convert data sets to data.table for efficiency
 setDT(temperature_lags)
 setDT(pss_simple)
 
-# make lag columns 
+# adjust data set so each lag value is own column (WIDE FORMAT)
 data_combined <- dcast(
   temperature_lags,
   mstudyid + survey_date ~ as.numeric(survey_date - date),  # Use lag as column name
@@ -101,12 +85,11 @@ data_combined <- dcast(
   fun.aggregate = mean  # In case of duplicates, take the mean
 )
 
-
 # Rename columns to match the `temp_lag_` format
 setnames(data_combined, old = names(data_combined)[3:ncol(data_combined)], 
          new = paste0("temp_lag_", 0:(ncol(data_combined) - 3)))
 
-
+# Join the temp data with the 
 data_combined <- merge(data_combined, pss_simple[, .(mstudyid, survey_date, PSS4)], 
                        by = c("mstudyid", "survey_date")) %>%
   filter(!is.na(temp_lag_0))
