@@ -65,7 +65,7 @@ wbgt_cascade_simple <- wbgt_cascade %>%
 temperature_lags <- pss_simple %>%
   filter(diffdays < 0) %>% # focusing just on pre delivery surveys 
   select(mstudyid, vname, survey_date) %>%
-  mutate(start_date = survey_date - 7) %>%  # define the start of the window
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
   rowwise() %>% # perform following operations for each row
   mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
   unnest(lag_dates) %>%  # expand rows for each date in the list above
@@ -97,7 +97,7 @@ temperature_lags_wide <- merge(temperature_lags_wide, pss_simple[, .(mstudyid, s
   filter(!is.na(temp_lag_0)) # remove cases where no temperature data for the participant 
 
 # temp data is matrix of temperature lags for each participant (necessary for DLM)
-temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_7) %>%
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
   as.matrix()
 ```
 
@@ -173,12 +173,179 @@ temp_third_quartile = as.numeric(temp_third_quartile)
 
 plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3, cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile), ylim = c(0, 2))
 
+# Examine lag effect at top percentile 
+temp_top_pct = round(quantile(as.vector(temp_data), 0.99), 1) # third quartile of temperature
+temp_top_pct = as.numeric(temp_top_pct)
+
+plot(cpred, "slices", var = temp_top_pct, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3, cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_top_pct), ylim = c(0, 2))
 
 
-## Examine effect of temperature at lag = 2
 
-plot(cpred, "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2), ylim = c(-1, 7)) # CI shrinks to 0 at centering point reference temperature. Effect size (OR) is defined to be exactly 0 at the baseline. Comparing temperatures to the baseline.
+## Examine effect of temperature at lag = 80 (try a few different options based on 3d plot)
+
+plot(cpred, "slices", lag = 80, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 80), ylim = c(-1, 7)) # CI shrinks to 0 at centering point reference temperature. Effect size (OR) is defined to be exactly 0 at the baseline. Comparing temperatures to the baseline.
 ```
+
+
+
+
+# Function to find best parameters for DLNM: BIC
+
+```{r}
+# function that does a grid search over DLNM parameters to find the best model
+
+fit_DLNMs_glm = function(args_list, exposure_data, min_lag, max_lag, model_data, outcome, glm_family, covars = NULL, verbose = TRUE){
+  # function inputs
+  # args_list: list of DLNM parameters to try (list of lists)
+  # exposure_data: matrix of exposure history data. should be in reverse time order. first column exposure from last day, last column exposure from first day
+  # min_lag: numeric, minimum lag to use in DLNM
+  # max_lag: numeric: maximum lag to use in DLNM
+  # model_data: dataframe with all covariate data
+  # outcome: character string, the outcome column name
+  # glm_family: character string, specifying the link function
+  # covars: a vector of character strings, vector containing the column names of the adjusting covariates (default: NULL)
+  # verbose: logical, indicates if best (lowest BIC) model parameters should be printed. default: TRUE
+  
+  # returns a named list containing a dataframe with the BIC of all the model parameter argument combinations for lag and variable;
+  # the DLNM model parameters used for the variable in the best model and then the DLNM model parameters used for the lag in the best model
+  # best model defined as model with lowest BIC
+  
+  num_args = length(args_list) # number of different DLNM model parameters
+  indices = seq(1, num_args, 1) # indices for the DLNM model parameters
+  combo_indices = cbind(t(matrix(rep(indices, 2), ncol = 2)), combn(indices, 2)) # all combinations of the DLNM model parameters. used by for-loop.
+  
+  BIC = rep(NA, ncol(combo_indices)) # initialize for BIC vector
+  smallest_BIC = Inf; smallest_BIC_i = NA # initialize, to store the smallest BIC value/ the index of DLNM argument combination that resulted in the smallest BIC
+  
+  return_df = data.frame(matrix(NA, nrow = ncol(combo_indices), ncol = 4)) # initialize dataframe to return with AIC and BIC
+  colnames(return_df) = c("DLNM_argvar", "DLNM_arglag", "AIC", "BIC")
+  
+  # Handle the formula based on presence of covariates
+  if (is.null(covars) || length(covars) == 0) {
+    base_GLM_formula_str = paste(outcome, " ~ 1", sep = "") # Only intercept and cross-basis
+  } else {
+    base_GLM_formula_str = paste(outcome, " ~ ", do.call(paste, c(as.list(covars), sep = " + ")), sep = "") # Covariates + cross-basis
+  }
+  
+  for(i in 1:ncol(combo_indices)){ # for all combinations of the DLNM model parameters
+    ind1 = combo_indices[1, i]; ind2 = combo_indices[2, i] # get the appropriate indices for DLNM model parameter for loop i
+    # cross-basis matrix for DLNM
+    cb = crossbasis(exposure_data, lag = c(min_lag, max_lag), argvar = args_list[[ind1]], arglag = args_list[[ind2]])
+    # model with crossbasis
+    model = glm(formula = update(as.formula(base_GLM_formula_str), ~ . + cb), data = model_data, family = glm_family)
+    BIC_i = BIC(model) # get i-th BIC
+    BIC[i] = BIC_i # fill in BIC vector
+    if(BIC_i < smallest_BIC){ # if the i-th BIC is the smallest so far, update smallest_AIC
+      smallest_BIC = BIC_i
+      smallest_BIC_i = i
+    }
+    # update returned data frame with AIC, BIC
+    return_df[i, "DLNM_argvar"] = paste(names(args_list[[ind1]]), args_list[[ind1]], sep = ":", collapse = ", ")
+    return_df[i, "DLNM_arglag"] = paste(names(args_list[[ind2]]), args_list[[ind2]], sep = ":", collapse = ", ")
+    return_df[i, "AIC"] = AIC(model)
+    return_df[i, "BIC"] = BIC_i
+  }
+  
+  if(verbose){ # print the best model parameters (best defined here as lowest AIC)
+    best_var_arg = combo_indices[1, smallest_BIC_i] # best model parameters for predictor/exposure
+    best_lag_arg = combo_indices[2, smallest_BIC_i] # best model parameters for lag
+    print(paste("var: ", paste(names(args_list[[best_var_arg]]), args_list[[best_var_arg]], sep = ": ", collapse = ", ")))
+    print(paste("lag: ", paste(names(args_list[[best_lag_arg]]), args_list[[best_lag_arg]], sep = ": ", collapse = ", ")))
+  }
+  return(list(results = return_df, 
+              minBIC_argvar = args_list[[combo_indices[1, smallest_BIC_i]]], 
+              minBIC_arglag = args_list[[combo_indices[2, smallest_BIC_i]]]))
+}
+
+```
+
+
+```{r}
+args = list(list(fun = "bs", df = 4, degree = 2),
+            list(fun = "bs", df = 5, degree = 2),
+            list(fun = "bs", df = 4, degree = 3),
+            list(fun = "bs", df = 5, degree = 3))
+
+
+dlnm_result = fit_DLNMs_glm(args_list = args, 
+                            exposure_data = temp_data, 
+                            min_lag = 1, max_lag = ncol(temp_data),
+                            model_data = temperature_lags_wide, 
+                            outcome = "PSS4",  
+                            glm_family = "gaussian")
+```
+
+```{r}
+dlnm_result$minBIC_argvar
+dlnm_result$minBIC_arglag
+```
+
+```{r}
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = dlnm_result$minBIC_argvar, arglag = dlnm_result$minBIC_arglag)
+
+
+model = glm(formula = PSS4 ~ cb, data = temperature_lags_wide, family = "gaussian") # 
+
+cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+plot at specific exposure slice
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+
+plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile, ", reference"), ylim = c(0, 2))
+```
+
+plot at specific lag slice
+
+```{r}
+plot(cpred, "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2), ylim = c(-1, 7))
+```
+
+```{r}
+plot(cpred, ptype = "3d")
+```
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+
+print(paste0("Third Quartile: ", temp_third_quartile))
+
+
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+
+# Extract predicted values and confidence intervals for the third quartile
+fit_values = cpred$matfit[as.character(temp_third_quartile), ]
+low_values = cpred$matlow[as.character(temp_third_quartile), ]
+high_values = cpred$mathigh[as.character(temp_third_quartile), ]
+
+
+plot(1:ncol(cpred$matfit), fit_values, type = "l", lwd = 2, col = "blue",
+     ylab = "Predicted Response", xlab = "Lag",
+     main = paste("Predicted Response for Temperature:", temp_third_quartile))
+lines(1:ncol(cpred$matfit), low_values, col = "red", lty = 2)
+lines(1:ncol(cpred$matfit), high_values, col = "red", lty = 2)
+legend("topright", legend = c("Predicted", "Lower CI", "Upper CI"), 
+       col = c("blue", "red", "red"), lty = c(1, 2, 2), lwd = c(2, 1, 1))
+
+
+
+summary_values = data.frame(
+  Lag = 1:ncol(cpred$matfit),
+  Predicted = fit_values,
+  LowerCI = low_values,
+  UpperCI = high_values
+)
+print(summary_values)
+
+
+overall_effect = sum(fit_values)
+print(paste("Overall Effect for Temperature:", temp_third_quartile, "is", overall_effect))
+
+```
+
 
 
 
