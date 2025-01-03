@@ -79,9 +79,30 @@ pss_recode <- pss_clean %>%
 
 
 
+## Recoding crisis data so b question is NA when a indicates event did not occur / NA response ----
+
+### LET 3 contiunue to represent NA in the data 
+
+crisis_recode <- crisis_data %>%
+  mutate(
+    # Replace `9` with 3 for all columns starting with "a"
+    across(matches("^a\\d+$"), ~ ifelse(. == 9, 3, .)),
+    
+    # Step 2: Iterate over the "a" and "b" pairs to apply the second rule
+    across(matches("^b\\d+$"), ~ {
+      # Extract the column number from the "b" column name
+      col_num <- gsub("^b", "", cur_column())
+      # Get the corresponding "a" column
+      a_col <- paste0("a", col_num)
+      # Make "b" value NA if "a" is 0 or NA
+      ifelse(get(a_col) %in% c(0, 3), 3, .)
+    })
+  )
+  
 
 # Developing NLE score ----
-crisis_data <- crisis_data %>%
+
+crisis_recode <- crisis_recode %>%
   
   # replace 3 with NA to reflect what skip logic would have done
   # mutate(across(matches("^b\\d+$"), ~ replace(., . == 3, NA))) %>%
@@ -237,26 +258,26 @@ crisis_data <- crisis_data %>%
   
 
 # Setting up labels for clarity
-var_label(crisis_data$criauthneg) <- "Sum of prehome authority negative events"
-var_label(crisis_data$cricareerneg) <- "Sum of prehome career negative events"
-var_label(crisis_data$crifinneg) <- "Sum of prehome financial negative events"
-var_label(crisis_data$crihomeneg) <- "Sum of prehome home negative events"
-var_label(crisis_data$crihomesafeneg) <- "Sum of prehome home safety negative events"
-var_label(crisis_data$crilegalneg) <- "Sum of prehome legal negative events"
-var_label(crisis_data$crimedselfneg) <- "Sum of prehome self medical issues negative events"
-var_label(crisis_data$crimedothneg) <- "Sum of prehome other medical issues negative events"
-var_label(crisis_data$crineighsafeneg) <- "Sum of prehome neighborhood safety negative events"
-var_label(crisis_data$crirelneg) <- "Sum of prehome relationship negative events"
-var_label(crisis_data$criprejneg) <- "Sum of prehome prejudice negative events"
+var_label(crisis_recode$criauthneg) <- "Sum of prehome authority negative events"
+var_label(crisis_recode$cricareerneg) <- "Sum of prehome career negative events"
+var_label(crisis_recode$crifinneg) <- "Sum of prehome financial negative events"
+var_label(crisis_recode$crihomeneg) <- "Sum of prehome home negative events"
+var_label(crisis_recode$crihomesafeneg) <- "Sum of prehome home safety negative events"
+var_label(crisis_recode$crilegalneg) <- "Sum of prehome legal negative events"
+var_label(crisis_recode$crimedselfneg) <- "Sum of prehome self medical issues negative events"
+var_label(crisis_recode$crimedothneg) <- "Sum of prehome other medical issues negative events"
+var_label(crisis_recode$crineighsafeneg) <- "Sum of prehome neighborhood safety negative events"
+var_label(crisis_recode$crirelneg) <- "Sum of prehome relationship negative events"
+var_label(crisis_recode$criprejneg) <- "Sum of prehome prejudice negative events"
 
-var_label(crisis_data$auth_nds) <- "Prehome authority negative domain score if ANY neg response"
-var_label(crisis_data$car_nds) <- "Prehome career negative domain score if ANY neg response"
-var_label(crisis_data$fin_nds) <- "Prehome financial negative domain score if ANY neg response"
-var_label(crisis_data$home_nds) <- "Prehome home negative domain score if ANY neg response"
-var_label(crisis_data$homesf_nds) <- "Prehome home safety negative domain score if ANY neg response"
-var_label(crisis_data$leg_nds) <- "Prehome legal negative domain score if ANY neg response"
-var_label(crisis_data$medself_nds) <- "Prehome self medical issues negative domain score if ANY neg response"
-var_label(crisis_data$medoth_nds) <- "Prehome other medical issues negative domain score if ANY neg response"
-var_label(crisis_data$neighsf_nds) <- "Prehome neighborhood safety negative domain score if ANY neg response"
-var_label(crisis_data$rel_nds) <- "Prehome relationship negative domain score if ANY neg response"
-var_label(crisis_data$prej_nds) <- "Prehome prejudice negative domain score if ANY neg response"
+var_label(crisis_recode$auth_nds) <- "Prehome authority negative domain score if ANY neg response"
+var_label(crisis_recode$car_nds) <- "Prehome career negative domain score if ANY neg response"
+var_label(crisis_recode$fin_nds) <- "Prehome financial negative domain score if ANY neg response"
+var_label(crisis_recode$home_nds) <- "Prehome home negative domain score if ANY neg response"
+var_label(crisis_recode$homesf_nds) <- "Prehome home safety negative domain score if ANY neg response"
+var_label(crisis_recode$leg_nds) <- "Prehome legal negative domain score if ANY neg response"
+var_label(crisis_recode$medself_nds) <- "Prehome self medical issues negative domain score if ANY neg response"
+var_label(crisis_recode$medoth_nds) <- "Prehome other medical issues negative domain score if ANY neg response"
+var_label(crisis_recode$neighsf_nds) <- "Prehome neighborhood safety negative domain score if ANY neg response"
+var_label(crisis_recode$rel_nds) <- "Prehome relationship negative domain score if ANY neg response"
+var_label(crisis_recode$prej_nds) <- "Prehome prejudice negative domain score if ANY neg response"
