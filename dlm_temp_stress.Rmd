@@ -1,16 +1,22 @@
 ---
 title: "Distributed Lag Model"
-output: html_document
-date: "2024-12-06"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+    toc_float: true
+date: "`r Sys.Date()`"
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-### Set Up: Load Packages and Source Code to Load Data 
+# General Set Up
 
-```{r}
+### Load Packages and Source Code to Load Data
+
+```{r, message=FALSE, warning=FALSE}
 ## Load in the packages 
 library(here)
 library(tidyverse)
@@ -20,19 +26,18 @@ library(forcats) # For reordering factor levels
 library(dlnm)
 library(data.table)
 
-
 ## Source in the stress and the weather data 
 
 # stress data
-source(here("clean_stress_data.R")) # pss_recode and crisis_data and the output datasets of interest
+source(here("clean_stress_data.R")) # pss_recode and crisis_recode and the output datasets of interest
 
 # weather data 
 source(here("explore_weather_data.R")) # wbgt_cascade and heat_averages are outputs of interest 
 ```
 
-### Simplify data
+### Clean and Simpify Data
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 ## PSS data
 pss_simple <- pss_recode %>% 
   select(mstudyid, survey_datetime, PSS4, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>% # select variables of interest 
@@ -40,13 +45,13 @@ pss_simple <- pss_recode %>%
   mutate(survey_pre_post_birth = fct_relevel(survey_pre_post_birth, "pre_delivery", "post_delivery"))
 
 ## CRYSIS data
-crisis_simple <- crisis_data %>%
+crisis_simple <- crisis_recode %>%
   mutate(
     quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
     quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
     survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
     select(mstudyid, fin_events:survey_datetime, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
-  select(-c(crireadneg:crikidneg, experienced_auth:experienced_oth)) %>%
+  select(-c(crireadneg:crikidneg)) %>%
   mutate(survey_date = as.Date(survey_datetime))  # Extract the date part of survey_datetime
 
 ## WEATHER DATA 
@@ -54,13 +59,15 @@ wbgt_cascade_simple <- wbgt_cascade %>%
   select(community, time, twx) %>%
   mutate(community = str_remove(community, "_manual$")) %>% # adjust community names cascade data to make sure they match with PSS
   distinct() # remove duplicates from "_manual" removal step above. The temp measurements were the same for each. 
-
 ```
 
+# DLMN on the PSS Data
+
+## DLMN Set Up 
 
 ### Prep data for DLM by obtaining daily lags and creating matrix of temperatures
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # Create a sequence of dates for each survey date with lags (LONG FORMAT)
 temperature_lags <- pss_simple %>%
   filter(diffdays < 0) %>% # focusing just on pre delivery surveys 
@@ -101,23 +108,19 @@ temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
   as.matrix()
 ```
 
+### Setting up DLNM model parameters and finding the cross-basis matrix
 
-### Setting up the DLM
-
-```{r}
-# determine centering value 
-temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median)
-temp_median
-
+```{r, message=FALSE, warning=FALSE}
 # set up DLNM model parameters ----
+
 # B-splines allow for smooth, flexible relationships by joining polynomial pieces at knots
 # Number of internal knots = df−(degree+1). Can have 0 internal knots, in which case fit cubic relationship between endpoints 
 
 # predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
-var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
 
 # lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
-lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
 
 # cross-basis matrix for DLNM
 cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
@@ -127,20 +130,29 @@ cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag
 # the cross-basis matrix combines these two bases, resulting in a two-dimensional matrix.
 
 summary(cb)
-
 # Matrix Structure:
 # Rows: Correspond to individual observations (participants).
 # Columns: Represent combinations of predictor and lag basis functions.
 ```
 
-### Model Fitting (use crossbasis in the model)
+### Model Fitting (use cross-basis matrix in the model)
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # fit the model
 model = glm(formula = PSS4 ~ cb, data = temperature_lags_wide, family = "gaussian") # stress scores continuous and normally dist, so gaussian family appropriate
 
-# check out the Bayesian Information Criteria (BIC)
+# check out the Bayesian Information Criteria (BIC) used to determine model fit 
 BIC(model)
+```
+
+### Get predictions from the DLNM using crosspred
+
+```{r, message=FALSE, warning=FALSE}
+# determine centering value. Used to compare effects of other temps to median. 
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+print(paste("The median temperature within the lag period is", temp_median))
+
 
 # generate predictions for a DLNM, set centering value as the median of all temperatures
 cpred = crosspred(cb, 
@@ -148,12 +160,13 @@ cpred = crosspred(cb,
                   ci.level = 0.95, # 95% confidence intervals calculated around predicted values
                   cen = temp_median, # predictions are relative to this baseline temperature.
                   by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
-
 ```
 
-### Plot model results 
+## Plot model results
 
-```{r}
+### Full Model Results
+
+```{r, message=FALSE, warning=FALSE}
 ## FULL MODEL RESULTS ---- 
 
 # Plot 3d surface plot
@@ -161,37 +174,128 @@ plot(cpred, "3d", xlab = "Temperature", ylab = "Lag (days)", zlab = "Effect on S
      main = "Temperature-Lag Effects on Stress Scores")
 
 # plot contour map of 3d plot
-plot(cpred, "contour", main = "Contour Plot of Temperature-Lag Effects")
+plot(cpred, "contour", main = "Contour Plot of Temperature-Lag Effects on Stress Scores", xlab = "Temperature", ylab = "Lag (days)")
 
+```
 
+The 3d plot and contour map suggests that extreme temperatures (low and high) are associated with increased perceived stress scores. For extreme heat, the effect is only evident for shorter lags (up to \~170 days and peaking between lags 50-100.)
+
+### Slice Model Results
+
+Allows for closer examination of results at specific temperature or lag value.
+
+#### Predicted Response to Third Quartile Temperature Compared to Median Temperature
+
+```{r, message=FALSE, warning=FALSE}
 
 ## SLICE MODEL RESULTS (e.g. at a certain temperature value or a certain lag value)
 
 ## Examine lag effect at third quartile temperature
 temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
 temp_third_quartile = as.numeric(temp_third_quartile)
+print(paste0("Third Quartile: ", temp_third_quartile))
 
-plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3, cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile), ylim = c(0, 2))
 
+## Customized plot of effect at third quartile
+plot_var = temp_third_quartile
+plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
+plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
+
+plot(x = names(plot_var_matfit),
+       y = plot_var_matfit,
+       xlab = "Lag", ylab = "Effect on Outcome",
+       main = paste0("Temperature:", " ", temp_third_quartile,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 26.6 relative to median 26
+polygon(x = c(names(plot_var_mathigh),
+              rev(names(plot_var_matlow))),
+        y = c(plot_var_mathigh,
+                rev(plot_var_matlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 26.6
+abline(h = 0, lty = 2) # add line at effect size = 0
+```
+
+Compared to the median temperature (26), the third quartile temperature (26.6) appears to be associated with a decrease in stress score, with a significant effect in lags 68-114. However, the effect appears minimal.
+
+```{r, message=FALSE, warning=FALSE}
+# calculate cumulative effect associated with exposure at third quartile
+all_thirdquantile = cbind(cpred$alllow[names(cpred$alllow) == temp_third_quartile], 
+                            cpred$allfit[names(cpred$allfit) == temp_third_quartile],
+                            cpred$allhigh[names(cpred$allhigh) == temp_third_quartile])
+colnames(all_thirdquantile) = c("alllow", "allfit", "allhigh")
+
+# show results of cumulative effect (low CI, fit, high CI)
+print(all_thirdquantile)
+```
+
+Over the whole lag period, the cumulative effect associated with exposure at 26.6, when compared to the median exposure of 26, is -5.2 (95% confidence interval (-9.9, -0.5)).
+
+#### Predicted Response to Top Percentile Temperature Compared to Median Temperature
+
+```{r, message=FALSE, warning=FALSE}
 # Examine lag effect at top percentile 
 temp_top_pct = round(quantile(as.vector(temp_data), 0.99), 1) # third quartile of temperature
 temp_top_pct = as.numeric(temp_top_pct)
-
-plot(cpred, "slices", var = temp_top_pct, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3, cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_top_pct), ylim = c(0, 2))
-
+print(paste0("Top Percentile: ", temp_top_pct))
 
 
-## Examine effect of temperature at lag = 80 (try a few different options based on 3d plot)
 
-plot(cpred, "slices", lag = 80, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 80), ylim = c(-1, 7)) # CI shrinks to 0 at centering point reference temperature. Effect size (OR) is defined to be exactly 0 at the baseline. Comparing temperatures to the baseline.
+## Customized plot of effect at top percentile 
+plot_var = temp_top_pct
+plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
+plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
+
+plot(x = names(plot_var_matfit),
+       y = plot_var_matfit,
+       xlab = "Lag", ylab = "Effect on Outcome",
+       main = paste0("Temperature:", " ", temp_top_pct,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 27.8 relative to median 26
+polygon(x = c(names(plot_var_mathigh),
+              rev(names(plot_var_matlow))),
+        y = c(plot_var_mathigh,
+                rev(plot_var_matlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 27.8
+abline(h = 0, lty = 2) # add line at effect size = 0
 ```
 
+Compared to the median temperature (26), the top percentile temperature (27.8) appears to be associated with a higher perceived stress score in early lags, and then a lower stress score further out from the survey date: However, neither effect is statistically significant.
 
+```{r, message=FALSE, warning=FALSE}
 
+# calculate cumulative effect associated with exposure at top percentile of temp
+all_top_percentile = cbind(cpred$alllow[names(cpred$alllow) == temp_top_pct], 
+                            cpred$allfit[names(cpred$allfit) == temp_top_pct],
+                            cpred$allhigh[names(cpred$allhigh) == temp_top_pct])
+colnames(all_top_percentile) = c("alllow", "allfit", "allhigh")
 
-# Function to find best parameters for DLNM: BIC
+# show results of cumulative effect (low CI, fit, high CI)
+print(all_top_percentile)
+```
 
-```{r}
+Over the whole lag period, the cumulative effect associated with exposure at 27.8, when compared to the median exposure of 26, is 3.4 (95% confidence interval (-15.6, 22.4).
+
+#### Examine effects at lag = 80
+
+```{r, message=FALSE, warning=FALSE}
+## Examine effect of temperature at lag = 80 (try a few different options based on 3d plot)
+
+plot(cpred, "slices", lag = 80, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 80), ylim = c(-1, 4)) # CI shrinks to 0 at centering point reference temperature. Effect size (OR) is defined to be exactly 0 at the baseline. Comparing temperatures to the baseline.
+```
+
+At lag 80, temperatures between 17 and 20 degrees appear to be associated with decreased stress scores. Once the temperature begins to exceed 28 degrees, a positive trend between increasing temperatures and stress scores seems to begin. As the top percentile of temperature is 27.8 degrees, there is less data at these high temperatures and the confidence interval widens.
+
+## Function to find best parameters for DLNM: BIC
+
+Use Michelle's function to test out various model parameters and examine model performance to find best parameter setup.
+
+```{r, message=FALSE, warning=FALSE}
 # function that does a grid search over DLNM parameters to find the best model
 
 fit_DLNMs_glm = function(args_list, exposure_data, min_lag, max_lag, model_data, outcome, glm_family, covars = NULL, verbose = TRUE){
@@ -259,8 +363,7 @@ fit_DLNMs_glm = function(args_list, exposure_data, min_lag, max_lag, model_data,
 
 ```
 
-
-```{r}
+```{r, message=FALSE, warning=FALSE}
 args = list(list(fun = "bs", df = 4, degree = 2),
             list(fun = "bs", df = 5, degree = 2),
             list(fun = "bs", df = 4, degree = 3),
@@ -275,85 +378,532 @@ dlnm_result = fit_DLNMs_glm(args_list = args,
                             glm_family = "gaussian")
 ```
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 dlnm_result$minBIC_argvar
 dlnm_result$minBIC_arglag
 ```
 
-```{r}
-cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = dlnm_result$minBIC_argvar, arglag = dlnm_result$minBIC_arglag)
+The optimal argvar and arglag matches what I used initially.
 
+# DLMN on Sum NDS (Crysis Data)
 
-model = glm(formula = PSS4 ~ cb, data = temperature_lags_wide, family = "gaussian") # 
+## DLMN Set Up
 
-cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+### Prep data for DLM by obtaining daily lags and creating matrix of temperatures
+
+```{r, message=FALSE, warning=FALSE}
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(wbgt_cascade_simple, by = c("vname" = "community", "date" = "time"))
+
+# Convert data sets to data.table for efficiency
+setDT(temperature_lags)
+setDT(crisis_simple)
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- dcast(
+  data = temperature_lags,
+  formula = mstudyid + survey_date ~ as.numeric(survey_date - date), # mstudyid + survey_date remain rows, as.numeric(survey_date - date) becomes columns 
+  value.var = "twx", # specifies that twx will populate new columns 
+  fill = NA,  # fill missing values with NA
+  fun.aggregate = mean  # in case of duplicates, take the mean
+)
+
+# Rename columns to match the `temp_lag_` format
+setnames(temperature_lags_wide, old = names(temperature_lags_wide)[3:ncol(temperature_lags_wide)], 
+         new = paste0("temp_lag_", 0:(ncol(temperature_lags_wide) - 3)))
+
+# Join the temp data with the stress data
+temperature_lags_wide <- merge(temperature_lags_wide, crisis_simple[, .(mstudyid, survey_date, sum_nds, resilience_score)], 
+                       by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # remove cases where no temperature data for the participant 
+
+# temp data is matrix of temperature lags for each participant (necessary for DLM)
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
 ```
 
-plot at specific exposure slice
+### Setting up DLNM model parameters and finding the cross-basis matrix
 
-```{r}
+Michelle's function was used to confirm the optimal degrees and df for this analysis as well.
+
+```{r, message=FALSE, warning=FALSE}
+# set up DLNM model parameters ----
+
+# B-splines allow for smooth, flexible relationships by joining polynomial pieces at knots
+# Number of internal knots = df−(degree+1). Can have 0 internal knots, in which case fit cubic relationship between endpoints 
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# the predictor values (temp_data) are transformed into B-spline basis functions via argvar.
+# the lag dimension is also transformed into B-spline basis functions via arglag.
+# the cross-basis matrix combines these two bases, resulting in a two-dimensional matrix.
+
+summary(cb)
+# Matrix Structure:
+# Rows: Correspond to individual observations (participants).
+# Columns: Represent combinations of predictor and lag basis functions.
+```
+
+### Model Fitting (use cross-basis matrix in the model)
+
+```{r, message=FALSE, warning=FALSE}
+# fit the model
+model = glm(formula = sum_nds ~ cb, data = temperature_lags_wide, family = "gaussian") # stress scores continuous and normally dist, so gaussian family appropriate
+
+# check out the Bayesian Information Criteria (BIC) used to determine model fit 
+BIC(model)
+```
+
+### Get predictions from the DLNM using crosspred
+
+```{r, message=FALSE, warning=FALSE}
+# determine centering value. Used to compare effects of other temps to median. 
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+print(paste("The median temperature within the lag period is", temp_median))
+
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+```
+
+## Plot model results
+
+### Full Model Results
+
+```{r, message=FALSE, warning=FALSE}
+## FULL MODEL RESULTS ---- 
+
+# Plot 3d surface plot
+plot(cpred, "3d", xlab = "Temperature", ylab = "Lag (days)", zlab = "Effect on Stress Scores",
+     main = "Temperature-Lag Effects on Stress Scores")
+
+# plot contour map of 3d plot
+plot(cpred, "contour", main = "Contour Plot of Temperature-Lag Effects on Stress Scores", xlab = "Temperature", ylab = "Lag (days)")
+```
+
+The 3d plot and contour map suggests that extreme temperatures (low and high) are associated with an increased negative domain score (NDS). For high temeratures, the effect is most pronounced at temperatures above 28 degrees and lag times within 200 days of the survey.
+
+### Slice Model Results
+
+Allows for closer examination of results at specific temperature or lag value.
+
+#### Predicted Response to Third Quartile Temperature Compared to Median Temperature
+
+```{r, message=FALSE, warning=FALSE}
+
+## SLICE MODEL RESULTS (e.g. at a certain temperature value or a certain lag value)
+
+## Examine lag effect at third quartile temperature
 temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
 temp_third_quartile = as.numeric(temp_third_quartile)
-
-plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile, ", reference"), ylim = c(0, 2))
-```
-
-plot at specific lag slice
-
-```{r}
-plot(cpred, "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2), ylim = c(-1, 7))
-```
-
-```{r}
-plot(cpred, ptype = "3d")
-```
-
-```{r}
-temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
-
 print(paste0("Third Quartile: ", temp_third_quartile))
 
 
-temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+## Customized plot of effect at third quartile
+plot_var = temp_third_quartile
+plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
+plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
 
-# Extract predicted values and confidence intervals for the third quartile
-fit_values = cpred$matfit[as.character(temp_third_quartile), ]
-low_values = cpred$matlow[as.character(temp_third_quartile), ]
-high_values = cpred$mathigh[as.character(temp_third_quartile), ]
+plot(x = names(plot_var_matfit),
+       y = plot_var_matfit,
+       xlab = "Lag", ylab = "Effect on Outcome",
+       main = paste0("Temperature:", " ", temp_third_quartile,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 26.6 relative to median 26
+polygon(x = c(names(plot_var_mathigh),
+              rev(names(plot_var_matlow))),
+        y = c(plot_var_mathigh,
+                rev(plot_var_matlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 26.6
+abline(h = 0, lty = 2) # add line at effect size = 0
+```
+
+Compared to the median temperature (26), the third quartile temperature (26.6) appears to be associated with a decrease in NDS, with a significant effect in lags 28-235. However, the effect size for this association is small.
+
+```{r, message=FALSE, warning=FALSE}
+# calculate cumulative effect associated with exposure at third quartile
+all_thirdquantile = cbind(cpred$alllow[names(cpred$alllow) == temp_third_quartile], 
+                            cpred$allfit[names(cpred$allfit) == temp_third_quartile],
+                            cpred$allhigh[names(cpred$allhigh) == temp_third_quartile])
+colnames(all_thirdquantile) = c("alllow", "allfit", "allhigh")
+
+# show results of cumulative effect (low CI, fit, high CI)
+print(all_thirdquantile)
+```
+
+Over the whole lag period, the cumulative effect associated with exposure at 26.6, when compared to the median exposure of 26, is -5.8 (95% confidence interval (-8.6, -3.0)).
+
+#### Predicted Response to Top Percentile Temperature Compared to Median Temperature
+
+```{r, message=FALSE, warning=FALSE}
+# Examine lag effect at top percentile 
+temp_top_pct = round(quantile(as.vector(temp_data), 0.99), 1) # third quartile of temperature
+temp_top_pct = as.numeric(temp_top_pct)
+print(paste0("Top Percentile: ", temp_top_pct))
 
 
-plot(1:ncol(cpred$matfit), fit_values, type = "l", lwd = 2, col = "blue",
-     ylab = "Predicted Response", xlab = "Lag",
-     main = paste("Predicted Response for Temperature:", temp_third_quartile))
-lines(1:ncol(cpred$matfit), low_values, col = "red", lty = 2)
-lines(1:ncol(cpred$matfit), high_values, col = "red", lty = 2)
-legend("topright", legend = c("Predicted", "Lower CI", "Upper CI"), 
-       col = c("blue", "red", "red"), lty = c(1, 2, 2), lwd = c(2, 1, 1))
+## Customized plot of effect at top percentile 
+plot_var = temp_top_pct
+plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
+plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
+
+plot(x = names(plot_var_matfit),
+       y = plot_var_matfit,
+       xlab = "Lag", ylab = "Effect on Outcome",
+       main = paste0("Temperature:", " ", temp_top_pct,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 27.8 relative to median 26
+polygon(x = c(names(plot_var_mathigh),
+              rev(names(plot_var_matlow))),
+        y = c(plot_var_mathigh,
+                rev(plot_var_matlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 27.8
+abline(h = 0, lty = 2) # add line at effect size = 0
+```
+
+Compared to the median temperature (26), the top percentile temperature (27.8) appears to be associated with an increased NDS, with a significant effect in lags 0-167. In addition, the effect of this association is stronger than the association for the third quartile temperature.
+
+```{r, message=FALSE, warning=FALSE}
+
+# calculate cumulative effect associated with exposure at top percentile of temp
+all_top_percentile = cbind(cpred$alllow[names(cpred$alllow) == temp_top_pct], 
+                            cpred$allfit[names(cpred$allfit) == temp_top_pct],
+                            cpred$allhigh[names(cpred$allhigh) == temp_top_pct])
+colnames(all_top_percentile) = c("alllow", "allfit", "allhigh")
+
+# show results of cumulative effect (low CI, fit, high CI)
+print(all_top_percentile)
+```
+
+Over the whole lag period, the cumulative effect associated with exposure at 27.8, when compared to the median exposure of 26, is 27.9 (95% confidence interval (15.5, 40.2).
+
+#### Examine effects at lag = 50
+
+```{r, message=FALSE, warning=FALSE}
+## Examine effect of temperature at lag = 50 (try a few different options based on 3d plot)
+
+plot(cpred, "slices", lag = 50, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 50), ylim = c(-1, 4)) # CI shrinks to 0 at centering point reference temperature. Effect size (OR) is defined to be exactly 0 at the baseline. Comparing temperatures to the baseline.
+```
+
+At lag 50, temperatures between 18 and 22 degrees appear to be associated with decreased NDS. Once the temperature begins to exceed 27.5 degrees, a positive trend between increasing temperatures and NDS seems to begin. As the top percentile of temperature is 27.8 degrees, there is less data at these high temperatures and the confidence interval widens.
+
+# DLMN on Resilience Score (Crysis Data)
+
+Resilience scores were calculated using the total number of negative events that a participant reported experiencing and the number that the indicated had a negative effect on them. Specifically, the equation used was: $1 - \left(\frac{\text{Total Negative Responses}}{\text{Total Events}}\right)$.
+
+## DLMN Set Up
+
+### Model Fitting (use cross-basis matrix in the model)
+
+```{r, message=FALSE, warning=FALSE}
+# fit the model
+model = glm(formula = resilience_score ~ cb, data = temperature_lags_wide, family = "gaussian") # stress scores continuous and normally dist, so gaussian family appropriate
+
+# check out the Bayesian Information Criteria (BIC) used to determine model fit 
+BIC(model)
+```
+
+### Get predictions from the DLNM using crosspred
+
+```{r, message=FALSE, warning=FALSE}
+# determine centering value. Used to compare effects of other temps to median. 
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+print(paste("The median temperature within the lag period is", temp_median))
+
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+```
+
+## Plot model results
+
+### Full Model Results
+
+```{r, message=FALSE, warning=FALSE}
+## FULL MODEL RESULTS ---- 
+
+# Plot 3d surface plot
+plot(cpred, "3d", xlab = "Temperature", ylab = "Lag (days)", zlab = "Effect on Stress Scores",
+     main = "Temperature-Lag Effects on Stress Scores")
+
+# plot contour map of 3d plot
+plot(cpred, "contour", main = "Contour Plot of Temperature-Lag Effects on Stress Scores", xlab = "Temperature", ylab = "Lag (days)")
+```
+
+The 3d and contour plots of the lagged effect of temperature on resilience score tells a very similar story to the NDS. Extreme temperature values, both low and high, are associated with decreased resilience. For high temperatures, the effect is most pronounced at temperatures above 28 degrees and lag times within 200 days of the survey.
+
+### Slice Model Results
+
+Allows for closer examination of results at specific temperature or lag value.
+
+#### Predicted Response to Third Quartile Temperature Compared to Median Temperature
+
+```{r, message=FALSE, warning=FALSE}
+
+## SLICE MODEL RESULTS (e.g. at a certain temperature value or a certain lag value)
+
+## Examine lag effect at third quartile temperature
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+print(paste0("Third Quartile: ", temp_third_quartile))
+
+
+## Customized plot of effect at third quartile
+plot_var = temp_third_quartile
+plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
+plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
+
+plot(x = names(plot_var_matfit),
+       y = plot_var_matfit,
+       xlab = "Lag", ylab = "Effect on Outcome",
+       main = paste0("Temperature:", " ", temp_third_quartile,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 26.6 relative to median 26
+polygon(x = c(names(plot_var_mathigh),
+              rev(names(plot_var_matlow))),
+        y = c(plot_var_mathigh,
+                rev(plot_var_matlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 26.6
+abline(h = 0, lty = 2) # add line at effect size = 0
+```
+
+Compared to the median temperature (26), the third quartile temperature (26.6) appears to be associated with a very minor increase in the resilience score, with a significant effect in lags 72-131.
+
+```{r, message=FALSE, warning=FALSE}
+# calculate cumulative effect associated with exposure at third quartile
+all_thirdquantile = cbind(cpred$alllow[names(cpred$alllow) == temp_third_quartile], 
+                            cpred$allfit[names(cpred$allfit) == temp_third_quartile],
+                            cpred$allhigh[names(cpred$allhigh) == temp_third_quartile])
+colnames(all_thirdquantile) = c("alllow", "allfit", "allhigh")
+
+# show results of cumulative effect (low CI, fit, high CI)
+print(all_thirdquantile)
+```
+
+Over the whole lag period, the cumulative effect associated with exposure at 26.6, when compared to the median exposure of 26, is 0.31 (95% confidence interval (-0.03, 0.64)).
+
+#### Predicted Response to Top Percentile Temperature Compared to Median Temperature
+
+```{r, message=FALSE, warning=FALSE}
+# Examine lag effect at top percentile 
+temp_top_pct = round(quantile(as.vector(temp_data), 0.99), 1) # third quartile of temperature
+temp_top_pct = as.numeric(temp_top_pct)
+print(paste0("Top Percentile: ", temp_top_pct))
 
 
 
-summary_values = data.frame(
-  Lag = 1:ncol(cpred$matfit),
-  Predicted = fit_values,
-  LowerCI = low_values,
-  UpperCI = high_values
-)
-print(summary_values)
+## Customized plot of effect at top percentile 
+plot_var = temp_top_pct
+plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
+plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
+
+plot(x = names(plot_var_matfit),
+       y = plot_var_matfit,
+       xlab = "Lag", ylab = "Effect on Outcome",
+       main = paste0("Temperature:", " ", temp_top_pct,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 27.8 relative to median 26
+polygon(x = c(names(plot_var_mathigh),
+              rev(names(plot_var_matlow))),
+        y = c(plot_var_mathigh,
+                rev(plot_var_matlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 27.8
+abline(h = 0, lty = 2) # add line at effect size = 0
+```
+
+Compared to the median temperature (26), the top percentile temperature (27.8) is associated with a decrease in resilience score, particularly in the near-term lag period - with a significant association between lags 24-145. This effect is larger than the association at the third quartile temperature.
+
+```{r, message=FALSE, warning=FALSE}
+
+# calculate cumulative effect associated with exposure at top percentile of temp
+all_top_percentile = cbind(cpred$alllow[names(cpred$alllow) == temp_top_pct], 
+                            cpred$allfit[names(cpred$allfit) == temp_top_pct],
+                            cpred$allhigh[names(cpred$allhigh) == temp_top_pct])
+colnames(all_top_percentile) = c("alllow", "allfit", "allhigh")
+
+# show results of cumulative effect (low CI, fit, high CI)
+print(all_top_percentile)
+```
+
+Over the whole lag period, the cumulative effect associated with exposure at 27.8, when compared to the median exposure of 26, is -2.3 (95% confidence interval (-3.8, -0.9).
+
+#### Examine effects at lag = 50
+
+```{r, message=FALSE, warning=FALSE}
+## Examine effect of temperature at lag = 80 (try a few different options based on 3d plot)
+
+plot(cpred, "slices", lag = 50, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 50), ylim = c(-0.15, 0.15)) # CI shrinks to 0 at centering point reference temperature. Effect size (OR) is defined to be exactly 0 at the baseline. Comparing temperatures to the baseline.
+```
+
+At lag 50, there does not appear to be much association between temperature and resilience score until the temperature reaches near the top percentile of temperatures recorded (27.8). From this point, higher temperatures are associated with a decreased resilience score. Again, at the top percentile there is less data at these high temperatures and the confidence interval widens.
+
+# Key Takeaways
+
+The more detailed summaries below focus on high temperature outcomes.
+
+1.  General Observations
+    -   Across the 3 measurements of mental health -- perceived stress score (PSS), negative domain score (NDS), and resilience score -- temperatures anomalies on both ends of the spectrum appear associated with worse reported mental health outcomes.
+
+    -   High temperatures (above 27.8°C) have a pronounced short-term impact, particularly within lags of 150 days, but there are some exceptions in long-term lags.
+2.  PSS
+    -   High temperatures (above 27.8 degrees) show strongest negative impact on PSS at a short term (roughly lags 30-120).
+
+    -   However, at lags near 200, the high temperatures appear associated with decreased PSS.
+3.  NDS
+    -   High temperatures (above 27.8 degrees) show strongest negative impact on NDS at a short term (roughly lags 0-150).
+4.  Resilience Score
+    -   High temperatures (above 27.8 degrees) show strongest negative impact on resilience at a short term (roughly lags 20-150).
+
+## Options for further analyses 
+
+-   Try other families of models (e.g. quasi-poisson, ordered logistic regression)
+
+-   Use other metrics of temperature (e.g. heat index) and compare to the WBT results.
+
+-   Add precipitation data as a co-variate in the model.
+
+-   Examine the lagged effect of precipitation.
 
 
-overall_effect = sum(fit_values)
-print(paste("Overall Effect for Temperature:", temp_third_quartile, "is", overall_effect))
+# Appendix 
 
+### Distribution of outcome variables 
+
+```{r, warning=FALSE, message=FALSE}
+hist(pss_simple$PSS4) # not technically continuous, approx normal
+
+hist(crisis_simple$sum_nds) # not technically continuous, approx normal dist. perhaps other family of models more appropriate than gaussian (e.g. quasipoisson), but gaussian appears to be catch all used in DLNM. 
+
+hist(crisis_simple$resilience_score) #continuous but bounded by 0 and 1. a little skewed right but fairly normal. 
 ```
 
 
+```{r, include=FALSE, echo=FALSE, warning=FALSE, message=FALSE}
+## CODE GRAVEYARD
+```
 
+```{r, include = FALSE, message=FALSE, warning=FALSE}
+# cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = dlnm_result$minBIC_argvar, arglag = dlnm_result$minBIC_arglag)
+# 
+# 
+# model = glm(formula = PSS4 ~ cb, data = temperature_lags_wide, family = "gaussian") 
+# 
+# cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
 
+```{r, include = FALSE, message=FALSE, warning=FALSE}
+# #plot at specific exposure slice 
+# 
+# temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+# temp_third_quartile = as.numeric(temp_third_quartile)
+# 
+# plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile, ", reference"), ylim = c(0, 2))
+```
 
+```{r, include = FALSE, message=FALSE, warning=FALSE}
+# # plot at specific lag slice
+# plot(cpred, "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2), ylim = c(-1, 7))
+# 
+# plot(cpred, ptype = "3d")
+```
 
-
-
-
-
-
-
+```{r, include = FALSE, message=FALSE, warning=FALSE}
+# plot(cpred, "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3, cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile), ylim = c(0, 2))
+# 
+# 
+# # Extract predicted values and confidence intervals for the third quartile
+# fit_values = cpred$matfit[as.character(temp_third_quartile), ]
+# low_values = cpred$matlow[as.character(temp_third_quartile), ]
+# high_values = cpred$mathigh[as.character(temp_third_quartile), ]
+# 
+# plot(1:ncol(cpred$matfit), fit_values, type = "l", lwd = 2, col = "blue",
+#      ylab = "Predicted Response", xlab = "Lag",
+#      main = paste("Predicted Response for third quartile temperature", temp_third_quartile, "\nCompared to Median Temp (26)"),
+#      ylim = range(c(low_values, high_values)))
+# 
+# lines(1:ncol(cpred$matfit), low_values, col = "red", lty = 2)
+# lines(1:ncol(cpred$matfit), high_values, col = "red", lty = 2)
+# # legend("right", legend = c("Predicted", "Lower CI", "Upper CI"), col = c("blue", "red", "red"), lty = c(1, 2, 2), lwd = c(2, 1, 1))
+# 
+# summary_values = data.frame(
+#   Lag = 1:ncol(cpred$matfit),
+#   Predicted = fit_values,
+#   LowerCI = low_values,
+#   UpperCI = high_values
+# )
+# 
+# overall_effect = sum(fit_values)
+# print(paste0("Overall Effect for the third quantile temperature (", temp_third_quartile, ") compared to the median temperature (26) is ", round(overall_effect,1)))
+# 
+# 
+# 
+# 
+# 
+# 
+# plot(cpred, "slices", var = temp_top_pct, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3, cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_top_pct), ylim = c(0, 2))
+# 
+# 
+# # Extract predicted values and confidence intervals for the top percentile
+# fit_values = cpred$matfit[as.character(temp_top_pct), ]
+# low_values = cpred$matlow[as.character(temp_top_pct), ]
+# high_values = cpred$mathigh[as.character(temp_top_pct), ]
+# 
+# 
+# plot(1:ncol(cpred$matfit), fit_values, type = "l", lwd = 2, col = "blue",
+#      ylab = "Predicted Response", xlab = "Lag",
+#      main = paste("Predicted Response for Top Percentile Temperature", temp_top_pct, "\n Compared to Median Temp (26)"),
+#      ylim = range(c(low_values, high_values)))
+# 
+# lines(1:ncol(cpred$matfit), low_values, col = "red", lty = 2)
+# lines(1:ncol(cpred$matfit), high_values, col = "red", lty = 2)
+# # legend("right", legend = c("Predicted", "Lower CI", "Upper CI"), col = c("blue", "red", "red"), lty = c(1, 2, 2), lwd = c(2, 1, 1))
+# abline(h = 0) # add line at effect size = 0
+# 
+# summary_values = data.frame(
+#   Lag = 1:ncol(cpred$matfit),
+#   Predicted = fit_values,
+#   LowerCI = low_values,
+#   UpperCI = high_values
+# )
+# 
+# overall_effect = sum(fit_values)
+# print(paste0("Overall Effect for the temperature, ",temp_top_pct, " compared to the median temperature (26) is ", round(overall_effect,1)))
+```
