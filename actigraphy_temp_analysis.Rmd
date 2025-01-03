@@ -1,0 +1,326 @@
+---
+title: "Heat and Sleep Exploratory Analysis"
+output: 
+  html_document:
+    toc: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+## Load in the packages 
+library(here)
+library(tidyverse)
+library(stargazer)
+library(forcats) # For reordering factor levels
+library(lubridate)
+library(broom)
+library(gt)
+```
+
+## Data Preparation
+
+```{r, warning=FALSE, message=FALSE}
+source(here("load_actigraphy_data.R")) #combines actigraphy data to one dataset with column indicating what study participant was in
+# actigraphy_simple_full is dataset of interest
+
+# show first rows of data of actigraphy_simple_full
+# head(actigraphy_simple_full)
+
+# load in weather data for period of interest
+wbgt_cascade_actigraphy <- read_csv(here("data", "Ghana-Tw-Extract.csv")) %>% # TWx is max wet bulb temperature 
+  filter(time > as.Date("2018-01-01"),
+         time < as.Date("2022-12-31")) %>%
+  select(community, time, twx) %>% # select relevant columns 
+  mutate(community = str_remove(community, "_manual$")) #remove _manual from communities so join works (_manual values appear to be same as community without _manual)
+```
+
+```{r, warning=FALSE, message=FALSE}
+actigraphy_with_temp <- actigraphy_simple_full %>%
+  rowwise() %>%  # Process each row individually
+  mutate(
+    avg_temp = wbgt_cascade_actigraphy %>%
+      filter(
+        community == vname,  # Match the community
+        time >= Start.Date & time <= End.Date  # Filter by date range
+      ) %>%
+      summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%  # Calculate mean temperature between the start date and end date (for just one night study, this would be a two day average)
+      pull(mean_temp)  # Extract the mean value
+  ) %>%
+  ungroup() %>% # Remove row-wise grouping 
+  filter(!is.na(avg_temp)) # remove NA community or participants where no temp data for community
+```
+
+After removing 7 participants who did not have a community that matches the communities in the temperature data, we are left with 177 participants. 
+
+## Sleep Time Minutes
+
+### Full Data
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+actigraphy_with_temp %>%
+  ggplot(aes(x = avg_temp, y = Sleep.Time..mins.)) +
+  geom_point() + 
+  geom_smooth(method="lm") +
+  theme_minimal() +
+  labs(x = "Average of Daily Maximum WBT Over Study Period",
+       y = "Total Sleep Time (mins)",
+       title = "Downward Trend in Sleep Time Driven by Temperature Outlier")
+
+sleep_time_model <- lm(Sleep.Time..mins. ~ avg_temp, data = actigraphy_with_temp)
+
+
+stargazer(
+  sleep_time_model,
+  type = "text", # Change to "html" or "latex" for respective outputs
+  title = "Regression Results: Total Sleep Time vs. Average Maximum Temperature",
+  dep.var.labels = "Total Sleep Time",
+  covariate.labels = c("Average Maximum Temperature"),
+  digits = 3, # Round to 3 decimal places
+  omit.stat = c("f", "adj.rsq"), # Only omit F-statistic and adjusted R-squared
+  star.cutoffs = c(0.05, 0.01, 0.001) # Custom significance levels
+)
+
+```
+
+The slope appears to be effected by a high leverage, influential point. The temperature recording (18.7) is over 4 degrees colder than the next coolest temperature (22.9). I do not see any evidence that this is an erroneous reading, but repeat the regression without this point. 
+
+### Removing High Leverage Point (temp <20)
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+actigraphy_with_temp_no_outlier <- actigraphy_with_temp %>%
+  filter(avg_temp > 20)
+
+# remove average temp below 20 as a temperature outlier and influential point
+actigraphy_with_temp_no_outlier %>%
+  ggplot(aes(x = avg_temp, y = Sleep.Time..mins.)) +
+  geom_point() + 
+  geom_smooth(method="lm") +
+  theme_minimal() +
+  labs(x = "Average of Daily Maximum WBT Over Study Period",
+       y = "Total Sleep Time (mins)",
+       title = "Significant Relationship Persists After Removing Temperature Outlier")
+
+sleep_time_model_no_outlier <- lm(Sleep.Time..mins. ~ avg_temp, data = actigraphy_with_temp_no_outlier)
+
+stargazer(
+  sleep_time_model_no_outlier,
+  type = "text", # Change to "html" or "latex" for respective outputs
+  title = "Regression Results: Total Sleep Time vs. Average Maximum Temperature",
+  dep.var.labels = "Total Sleep Time",
+  covariate.labels = c("Average Maximum Temperature"),
+  digits = 3, # Round to 3 decimal places
+  omit.stat = c("f", "adj.rsq"), # Only omit F-statistic and adjusted R-squared
+  star.cutoffs = c(0.05, 0.01, 0.001) # Custom significance levels
+)
+```
+
+## Sleep Ratio
+
+### Full Data
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+actigraphy_with_temp %>%
+  ggplot(aes(x = avg_temp, y = log(Sleep.Ratio))) +
+  geom_point() + 
+  geom_smooth(method="lm") +
+  theme_minimal() +
+  labs(x = "Average of Daily Maximum WBT Over Study Period",
+       y = "Log of Sleep Ratio",
+       title = "Temperature Shows a Slight, Non-Significant Negative Effect on Log Sleep Ratio.")
+
+
+sleep_ratio_model <- lm(log(Sleep.Ratio) ~ avg_temp, data = actigraphy_with_temp)
+
+stargazer(
+  sleep_ratio_model,
+  type = "text",
+  title = "Regression Results: Log Sleep Ratio vs. Average Maximum Temperature",
+  dep.var.labels = "Log Sleep Ratio",
+  covariate.labels = c("Average Maximum Temperature"),
+  digits = 3, # Round to 3 decimal places
+  omit.stat = c("f", "adj.rsq"), # Only omit F-statistic and adjusted R-squared
+  star.cutoffs = c(0.05, 0.01, 0.001) # Custom significance levels
+)
+```
+
+### Removing High Leverage Point (temp <20)
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+actigraphy_with_temp_no_outlier %>%
+  ggplot(aes(x = avg_temp, y = log(Sleep.Ratio))) +
+  geom_point() + 
+  geom_smooth(method="lm") +
+  theme_minimal() +
+  labs(x = "Average of Daily Maximum WBT Over Study Period",
+       y = "Log of Sleep Ratio",
+       title = "Temperature Shows a Slight, Non-Significant Negative Effect on Log Sleep Ratio.")
+
+
+sleep_ratio_model_no_outlier <- lm(log(Sleep.Ratio) ~ avg_temp, data = actigraphy_with_temp_no_outlier)
+
+stargazer(
+  sleep_ratio_model_no_outlier,
+  type = "text", # Change to "html" or "latex" for respective outputs
+  title = "Regression Results: Log Sleep Ratio vs. Average Maximum Temperature",
+  dep.var.labels = "Log Sleep Ratio",
+  covariate.labels = c("Average Maximum Temperature"),
+  digits = 3, # Round to 3 decimal places
+  omit.stat = c("f", "adj.rsq"), # Only omit F-statistic and adjusted R-squared
+  star.cutoffs = c(0.05, 0.01, 0.001) # Custom significance levels
+)
+```
+
+
+## Number of Awakenings
+
+### Full Data
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+actigraphy_with_temp %>%
+  ggplot(aes(x = avg_temp, y = Number.of.Awakenings)) +
+  geom_point() + 
+  geom_smooth(method="lm") +
+  theme_minimal() +
+  labs(x = "Average of Daily Maximum WBT Over Study Period",
+       y = "Number of Awakenings", 
+       title = "No Evidence of a Relationship Between WBT and Number of Awakenings")
+
+
+num_awakenings_model <- lm(Number.of.Awakenings ~ avg_temp, data = actigraphy_with_temp)
+
+stargazer(
+  num_awakenings_model,
+  type = "text", # Change to "html" or "latex" for respective outputs
+  title = "Regression Results: Number of Awakenings vs. Average Maximum Temperature",
+  dep.var.labels = "Number of Awakenings",
+  covariate.labels = c("Average Maximum Temperature"),
+  digits = 3, # Round to 3 decimal places
+  omit.stat = c("f", "adj.rsq"), # Only omit F-statistic and adjusted R-squared
+  star.cutoffs = c(0.05, 0.01, 0.001) # Custom significance levels
+)
+
+```
+
+### Removing High Leverage Point (temp <20)
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+actigraphy_with_temp_no_outlier %>%
+  ggplot(aes(x = avg_temp, y = Number.of.Awakenings)) +
+  geom_point() + 
+  geom_smooth(method="lm") +
+  theme_minimal() +
+  labs(x = "Average of Daily Maximum WBT Over Study Period",
+       y = "Number of Awakenings", 
+       title = "No Evidence of a Relationship Between WBT and Number of Awakenings")
+
+
+num_awakenings_model_no_outlier <- lm(Number.of.Awakenings ~ avg_temp, data = actigraphy_with_temp_no_outlier)
+
+stargazer(
+  num_awakenings_model_no_outlier,
+  type = "text", # Change to "html" or "latex" for respective outputs
+  title = "Regression Results: Number of Awakenings vs. Average Maximum Temperature",
+  dep.var.labels = "Number of Awakenings",
+  covariate.labels = c("Average Maximum Temperature"),
+  digits = 3, # Round to 3 decimal places
+  omit.stat = c("f", "adj.rsq"), # Only omit F-statistic and adjusted R-squared
+  star.cutoffs = c(0.05, 0.01, 0.001) # Custom significance levels
+)
+```
+
+
+## Key Takeaways
+1. Evidence suggests that increased temperatures are associated with a decrease in total sleep time
+2. Evidence suggests that increased temperatures are associated with a decrease in the sleep ratio (amount of time spent asleep vs awake)
+3. No evidence in an association between temperature and number of awakenings
+
+## Appendix (Residual / QQ plots)
+
+#### Full Data
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+## Explore Residuals
+sleep_time_resids <- resid(sleep_time_model)
+
+## Residual plot
+plot(sleep_time_resids, main = "Sleep Time Residual Plot")
+abline(h = 0)
+
+## QQplot
+qqnorm(sleep_time_resids, main = "Sleep Time QQ Plot of Residuals")
+qqline(sleep_time_resids, col = "blue")  # Adds a reference line
+
+
+
+
+## Explore Residuals
+sleep_ratio_resids <- resid(sleep_ratio_model)
+
+## Residual plot
+plot(sleep_ratio_resids, main = "Log Sleep Ratio Residual Plot")
+abline(h = 0)
+
+## QQplot
+qqnorm(sleep_ratio_resids, main = "Log Sleep Ratio QQ Plot of Residuals")
+qqline(sleep_ratio_resids, col = "blue")  # Adds a reference line
+
+
+
+
+## Explore Residuals
+num_awakenings_resids <- resid(num_awakenings_model)
+
+## Residual plot
+plot(num_awakenings_resids, main = "Number of Awakenings Residual Plot")
+abline(h = 0)
+
+## QQplot
+qqnorm(num_awakenings_resids, main = "Number of Awakenings QQ Plot of Residuals")
+qqline(num_awakenings_resids, col = "blue")  # Adds a reference line
+```
+
+#### Removing Temperature Outlier
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+## Explore Residuals
+sleep_time_resids_no_outlier <- resid(sleep_time_model_no_outlier)
+
+## Residual plot
+plot(sleep_time_resids_no_outlier, main = "Sleep Time Residual Plot")
+abline(h = 0)
+
+## QQplot
+qqnorm(sleep_time_resids_no_outlier, main = "Sleep Time QQ Plot of Residuals")
+qqline(sleep_time_resids_no_outlier, col = "blue")  # Adds a reference line
+
+
+
+
+## Explore Residuals
+sleep_ratio_resids_no_outlier <- resid(sleep_ratio_model_no_outlier)
+
+## Residual plot
+plot(sleep_ratio_resids_no_outlier, main = "Log Sleep Ratio Residual Plot")
+abline(h = 0)
+
+## QQplot
+qqnorm(sleep_ratio_resids_no_outlier, main = "Log Sleep Ratio QQ Plot of Residuals")
+qqline(sleep_ratio_resids_no_outlier, col = "blue")  # Adds a reference line
+
+
+
+
+## Explore Residuals
+num_awakenings_resids_no_outlier <- resid(num_awakenings_model_no_outlier)
+
+## Residual plot
+plot(num_awakenings_resids_no_outlier, main = "Number of Awakenings Residual Plot")
+abline(h = 0)
+
+## QQplot
+qqnorm(num_awakenings_resids_no_outlier, main = "Number of Awakenings QQ Plot of Residuals")
+qqline(num_awakenings_resids_no_outlier, col = "blue")  # Adds a reference line
+```
+
