@@ -145,6 +145,8 @@ colnames(allRR_thirdquantile) = c("allRR_low", "allRR", "allRR_high")
 allRR_thirdquantile
 ```
 
+
+
 # Function to find best parameters for DLNM
 
 ```{r}
@@ -330,7 +332,8 @@ fit_DLNMs_glm = function(args_list, exposure_data, min_lag, max_lag, model_data,
 
 
 ```{r}
-dlnm_result = fit_DLNMs_glm(args_list = args, exposure_data = temp_data, 
+dlnm_result = fit_DLNMs_glm(args_list = args, 
+                            exposure_data = temp_data, 
                             min_lag = 1, max_lag = ncol(temp_data),
                             model_data = DLNM_model_df, 
                             outcome = "outcome", 
