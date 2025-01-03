@@ -1,0 +1,599 @@
+---
+title: "DLNM Code"
+author: "Michelle Li"
+date: "2024-12-18"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+    toc_float: true
+---
+
+# Data
+
+```{r}
+library(dlnm)
+data(chicagoNMMAPS)
+```
+
+## Binary Outcome
+
+Temperature is from chicagoNMMAPS, with simulated outcome days and risk factor. Outcome: binary: TRUE (event happens on visit date) or FALSE (event does not happen on visit date)
+
+```{r echo = FALSE}
+chicagoNMMAPS_1990to2000 = chicagoNMMAPS[chicagoNMMAPS$year >= 1990 & chicagoNMMAPS$year <= 2000, ]
+# summary(chicagoNMMAPS_1990to2000$temp)
+
+# probability of outcome = TRUE happening for a day at a given temperature, x is the CDF of mixture of three normal distributions defined below for x < 30, then probability set to 0.75 for x >= 28. then add noise by flipping the outcome results 5% of the time
+prob_outcome = function(x) 0.2 * pnorm(x, -5, 3) + 0.4 * pnorm(x, 15, 5) + 0.4 * pnorm(x, 30, 5) 
+
+chicagoNMMAPS_1990to2000$prob_outcome = NA
+chicagoNMMAPS_1990to2000$prob_outcome[chicagoNMMAPS_1990to2000$temp < 28] = prob_outcome(chicagoNMMAPS_1990to2000$temp[chicagoNMMAPS_1990to2000$temp < 28])
+chicagoNMMAPS_1990to2000$prob_outcome[chicagoNMMAPS_1990to2000$temp >= 28] = 0.75  
+
+set.seed(123)
+# randomly sample dates
+random_dates = sample(chicagoNMMAPS_1990to2000$date, size = 1750, replace = TRUE)
+DLNM_model_df = data.frame(visit_date = random_dates)
+DLNM_model_df$DLNM_start_date = DLNM_model_df$visit_date - 7
+DLNM_model_df$id = paste0("ID", sample(1:1750, size = 1750, replace = FALSE))
+
+id_date_prob_outcome = DLNM_model_df[,c("id", "visit_date")]
+id_date_prob_outcome = merge(id_date_prob_outcome, chicagoNMMAPS_1990to2000[,c("date", "prob_outcome")], by.x = "visit_date", by.y = "date")
+id_date_prob_outcome$outcome = NA
+for(i in 1:nrow(id_date_prob_outcome)){
+  id_date_prob_outcome$outcome[i] = sample(c(TRUE, FALSE), size = 1, prob = c(id_date_prob_outcome$prob_outcome[i], 1 - id_date_prob_outcome$prob_outcome[i]))
+  flip = sample(c(TRUE, FALSE), size = 1, prob = c(0.05, 0.95))
+  if(flip){
+    id_date_prob_outcome$outcome[i] = !id_date_prob_outcome$outcome[i]
+  }
+  
+  
+}
+
+
+DLNM_temp_event_df = DLNM_model_df
+DLNM_model_df = data.frame(id = "A", DLNM_day = 1, date = as.Date("01/01/1900", "%m/%d/%y")); DLNM_model_df = DLNM_model_df[-1,]
+for(i in 1:nrow(DLNM_temp_event_df)){
+  dates_i = seq.Date(from = DLNM_temp_event_df[i, "DLNM_start_date"], to = DLNM_temp_event_df[i, "visit_date"], by = 1)
+  DLNM_model_df = rbind(DLNM_model_df, data.frame(id = rep(DLNM_temp_event_df[i, "id"], length(dates_i)), DLNM_day = paste0("day", seq(1, length(dates_i), 1)), date = dates_i))
+}
+DLNM_model_df = merge(DLNM_model_df, chicagoNMMAPS[,c("date", "temp")], by.x = c("date"), by.y = c("date"))
+DLNM_model_df = reshape(DLNM_model_df[,c("id", "DLNM_day", "temp")], idvar = "id", timevar = "DLNM_day", v.names = "temp", direction = "wide")
+
+DLNM_model_df = merge(DLNM_model_df, id_date_prob_outcome[,c("id", "outcome")])
+
+DLNM_model_df$risk = NA
+DLNM_model_df$risk[DLNM_model_df$outcome] = rnorm(n = sum(DLNM_model_df$outcome), mean = 7, sd = 3)  # higher risk set for outcome = TRUE
+DLNM_model_df$risk[!DLNM_model_df$outcome] = rnorm(n = sum(!DLNM_model_df$outcome), mean = 3, sd = 3) # lower risk set for outcome = FALSE (there is overlap between the two normal distributions that risk is simulated from)
+
+```
+
+```{r}
+print("Counts of Event Outcome")
+table(DLNM_model_df$outcome)
+```
+
+
+## Continuous Outcome
+
+The same as above. Continuous outcome will be defined using a linear combination of the temperatures (lag 0, lag 1, lag 2; including squared values for lag 0 and lag 1) and risk and a random error.  (Note: lag 0 = day 8, lag 1 = day 7, lag 2 = day 6)
+
+```{r}
+continuous_DLNM_model_df = DLNM_model_df
+set.seed(123)
+continuous_DLNM_model_df$outcome = 0.05 * continuous_DLNM_model_df$temp.day8 + 0.01 * continuous_DLNM_model_df$temp.day8^2 + 0.03 * continuous_DLNM_model_df$temp.day7 + 0.01 * continuous_DLNM_model_df$temp.day7^2 + 0.01 * continuous_DLNM_model_df$temp.day6 + continuous_DLNM_model_df$risk + rnorm(n = nrow(continuous_DLNM_model_df), mean = 0, sd = 10)
+```
+
+# Fit a DLNM
+
+## Binary outcome
+
+The day of the visit is when the event happens or not (binary outcome).
+
+### Data set up
+
+We have both a general dataframe (DLNM_model_df) that contains the outcome, covariates ("risk" here) and predictor/exposure/variable for a range of time and a predictor/exposure/variable matrix (temp_data) that only contains the predictor/exposure/variable for a range of time. The ordering of the rows should be the same between the two; each row should be for the same participant across both the general dataframe and the variable matrix.
+
+In this example, temperature is the predictor/ exposure/ variable (the various terms in the dlnm documentation). The predictor/exposure/variable should be in a matrix. This matrix should only include the exposure (do not include ID column, outcomes, adjusting covariates). The rows should be for each participant (1750 in this example) and the columns are the predictor/exposure in lag order (8 in this example = the visit date/ when event either happens or not (1 day) + the week before (7 days)).
+
+Complete data is needed for the whole predictor/exposure time frame for each participant.
+
+```{r}
+temp_data = DLNM_model_df[,c("temp.day1", "temp.day2", "temp.day3", "temp.day4", "temp.day5", "temp.day6", "temp.day7", "temp.day8")]  # day 8 is the visit day (lag 0). Day 1 is seven days before the measurement day
+temp_data = as.matrix(temp_data)
+
+class(temp_data)
+
+dim(temp_data)
+```
+
+The temperature data should also have columns in lag order for the DLNM, where the first column is the last in chronological time/ first lag, and the last column is the earliest in chronological time/ last lag. 
+
+Day 8 = lag 0 (day of visit/ when the event either happens or not), day 7 = lag 1 (one day before visit day), day 6 = lag 2 (two days before visit day), ..., day 1 = lag 7 (one week before visit day. the last day of temperature being considered)
+
+```{r}
+print("Data in chronological time order")
+head(temp_data)
+
+temp_data = temp_data[,rev(1:ncol(temp_data))] # reverse so columns are in lag order for DLNM
+# column 1 is lag 1 temperature, ...., column j is lag j temperature
+# "The matrix of exposure histories" https://cran.r-project.org/web/packages/dlnm/vignettes/dlnmExtended.pdf
+
+print("Data in 'lag' time order - Use this for DLNM cross basis")
+head(temp_data)
+```
+
+However, the DLNM package lag start number is 1, so lag = 0 is lag = 1 in the results below, lag = 1 is lag = 2 and so on. Starting from 0 would have been more appropriate for this example. 
+
+
+### fitting DLNM with a binary outcome and generating predictions
+
+Setting up DLNM model parameters: predictor and lag. In this example, both have b-splines with degree of freedom = 4 and degree of the piecewise polynomial = 3 (cubic splines).
+
+```{r}
+# set up DLNM model parameters
+# predictor DLNM model parameters
+var_arg = list(fun = "bs", df = 4, degree = 3) # b-splines degree of freedom = 4 and degree of the piecewise polynomial = 3
+# lag DLNM model parameters
+lag_arg = list(fun = "bs", df = 4, degree = 3) # b-splines degree of freedom = 4 and degree of the piecewise polynomial = 3
+```
+
+Find the cross-basis matrix using the crossbasis function. The input is the temperature matrix (should be in matrix form). crossbasis function documentation in the dlnm package: "The function generates the basis matrices for the two dimensions of predictor and lags, given the functions selected to model the relationship in each space. Then, these one-dimensions basis matrices are combined to create the related cross-basis matrix)."
+
+The lag argument is where you can define the lag range. In this example, the whole matrix is used. Note, the DLNM package lag start number is 1, which is why the range is specified as starting at 1 instead of 0 (even though we are using the date of the visit). ncol(temp_data) is so the whole matrix of values/whole lag range is used.
+
+```{r}
+# cross-basis matrix for DLNM
+# basis for the predictor and lag
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg)
+```
+
+Fit the DLNM: a model with the cross-basis matrix. Here, outcome is the binary outcome defined earlier and risk is an adjusting covariate. Family is set to "binomial"(link = 'logit') because the outcome is binary.
+
+```{r}
+model = glm(formula = outcome ~ cb + risk, data = DLNM_model_df, family = "binomial"(link='logit')) # model with cross-basis matrix. outcome column name of outcome in DLNM_model_df. risk is an adjusting covariate
+```
+
+Get predictions from the DLNM (crosspred). The centering value is set in this example as the median of the temperatures - a common centering value but if another value would make sense in your analysis, you can set the value using the "cen" argument. The centering value is the reference value against which results are interpreted.
+
+Predictions are the estimated associations on a grid of the predictor and lags. Function arguments can specify the predictor range, lag range, predictor sequence increments, and/or lag increments. See documentation for more information.
+
+In this example, I set the increment of the sequence of predictors to 0.1, the sequence minimum and maximum were those of the predictors used to fit the DLNM. Lag range was that used to fit the DLNM as well.
+
+ci.level is the confidence interval's confidence level - set to 0.95 here.
+
+```{r}
+temp_median = round(median(as.vector(temp_data)), 1) # centering value (median)
+temp_median
+# generate predictions, set centering value as the median of all temperatures
+cpred = crosspred(basis = cb, model = model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+### Plot on grid of predictors and lags
+
+A plot of prediction results for the whole grid of predictors/exposures and lags. Var = variable = predictor/exposure. The z-axis is odds ratio (OR), each pair of (variable, lag) values on the grid has an estimated odds ratio.
+
+This plot uses the dlnm package's plot function (plot.crosspred, which can be called with plot()); ptype = "3d" is need to get the 3-dimensional plot.
+
+```{r}
+plot(cpred, ptype = "3d")
+```
+
+Slices can then be taken along the predictor/exposure dimension or the lag dimension to get a 2-dimensional plot.
+
+### Plot at a specific predictor/exposure slice.
+
+This plot uses the dlnm package's plot function (plot.crosspred, which can be called with plot()); ptype = "slices". To plot at a specific predictor/exposure/variable value, specify the value using the "var" argument in the function. In this example, we plot at the third quartile of 19.4 degrees.
+
+The predictions should be interpreted as estimated associations at a specific variable value at a specific lag relative to the reference value. In other words, see the plot interpretation.
+
+Plot interpretation: An exposure at 19.4 degrees, relative to the median 10.6 degrees, is significantly associated with an increased odd of the event happening on the day of the visit (lag = 1). This also true for the day before/lag = 2, but to a lesser degree (lower OR than at lag = 1).
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+
+plot(cpred, ptype = "slices", var = temp_third_quartile, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile))
+```
+
+Slices are often made at first and third quartile when median is the reference value. Slices can be taken at any exposure value that predictions have been found for. 
+
+Note that if the predictor/exposure value was not included in crosspred then you cannot get estimations for that value. You can check which values were used for predictions by checking predvar in the crosspred object, as follows:
+
+```{r}
+cpred$predvar
+```
+
+An error is thrown if you try to retrieve a prediction for a variable value that was not used for prediction. Un-comment and run the line in the code chunk below to see a demonstration.
+
+```{r}
+19.55 %in% cpred$predvar  # FALSE not included
+# plot(cpred, ptype = "slices", var = 19.55, ylab = "OR", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile))  
+
+# Error in plot.crosspred(cpred, "slices", var = 19.55, ylab = "OR", xlab = "Lag", :
+# 'var' must match values used for prediction
+```
+
+
+Similarly, the lag range (minimum and maximum lag) can be found by checking lag in the crosspred object and the increments of the lag range by checking bylag, as follows: 
+
+```{r}
+cpred$lag
+cpred$bylag
+```
+
+An error is also thrown if you try to retrieve a prediction at a lag value that was not used for prediction. Un-comment and run the line in the code chunk below to see a demonstration.
+
+```{r}
+# plot(cpred, ptype = "slices", lag = 10, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 10))
+# Error in plot.crosspred(cpred, "slices", lag = 10, ylab = "OR", xlab = "Temperature °C", :
+# 'lag' must match values used for prediction
+```
+
+### plot at a specific lag slice.
+
+This plot uses the dlnm package's plot function (plot.crosspred, which can be called with plot()); ptype = "slices". To plot at a specific lag value, specify the value using the "lag" argument in the function. Here, we plot at lag = 1 (day of visit, whether event happen or not) and lag = 2 (day before visit day). 
+
+The numbering for lags starts at 1 in the DLNM package, which is why lag = 1 corresponds to the day of the visit, lag = 2 to the day before the visit day, etc.
+
+Notice that the estimated OR goes to 1 (no difference in odds) at the median temperature, since the median temperature was set as the reference value.
+
+Plot interpretation:
+
+On the day of the visit, higher temperatures relative to the median temperature is significantly associated with increased odds of the event happening, up to about 30 degrees, with a peak at 25 degrees. Also on the day of the visit, lower temperatures relative to the median temperature is significantly associated with decreased odds of the event happening, with a stronger effect seen at temperatures below -10.
+
+For the day before the visit (lag = 2), higher temperatures relative to the median temperature are significantly associated with higher odds of the event happening; lower temperatures relative to the median temperature are significantly associated with lower odds of the event happening. The confidence interval gets very wide at the lowest temperatures. This can happen due to the sparsity of data at those temperatures.
+
+```{r}
+plot(cpred, ptype = "slices", lag = 1, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 1))
+
+plot(cpred, ptype = "slices", lag = 2, ylab = "OR", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2))
+```
+
+The sparsity of temperatures below -20 at lag = 2 can be seen in the following histogram (lag = 2 corresponds to day = 7 in this example)
+
+```{r}
+hist(DLNM_model_df$temp.day7, main = "Distribution of temperatures at lag = 2", xlab = "Temperature")
+```
+
+### Overall effect for a specific temperature
+
+The overall effect (cumulative associations over the whole lag period) for a specific predictor/exposure value can be found using the following code.
+
+Since the outcome is binary, we need to use the exponentiated cumulative associations: the allRRfit to get the exponentiated cumulative associations and allRRlow and allRRhigh for the confidence intervals of that exponentiated cumulative associations.
+
+Over the whole lag period, the cumulative odds ratio for the event happening associated with exposure at 19.4, when compared to the median exposure of 10.6, is 3.42 (95% confidence interval (2.23, 5.22)).
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+print(paste0("Third Quartile: ", temp_third_quartile))
+allRR_thirdquantile = cbind(cpred$allRRlow[names(cpred$allRRlow) == temp_third_quartile], 
+                            cpred$allRRfit[names(cpred$allRRfit) == temp_third_quartile],
+                            cpred$allRRhigh[names(cpred$allRRhigh) == temp_third_quartile])
+colnames(allRR_thirdquantile) = c("allRR_low", "allRR", "allRR_high")
+allRR_thirdquantile
+```
+
+### Obtaining the predicted associations and confidence intervals
+
+Since the outcome is binary, to get the predicted associations/ odds ratio (the values that makes up the lines in the slice plots) and the confidence intervals of the predicted associations/ odds ratio (the values that make up the boundaries of the shaded regions in the slice plots), you use the following arguments: matRRfit, matRRlow, and matRRhigh (these are the associations exponentiated - so it's the odds ratio).
+
+In the example below, the code recreates the slice plot at a specific predictor/exposure/variable value by obtaining values from matRRfit, matRRlow, and matRRhigh at the specific value. This allows for easy customization of the slice plot.
+
+```{r}
+plot_var = 19.4
+plot_var_matRRfit = cpred$matRRfit[rownames(cpred$matRRfit) == plot_var, ]
+names(plot_var_matRRfit) = sub("lag", "", names(plot_var_matRRfit))
+plot_var_matRRlow = cpred$matRRlow[rownames(cpred$matRRlow) == plot_var, ]
+names(plot_var_matRRlow) = sub("lag", "", names(plot_var_matRRlow))
+plot_var_matRRhigh = cpred$matRRhigh[rownames(cpred$matRRhigh) == plot_var, ]
+names(plot_var_matRRhigh) = sub("lag", "", names(plot_var_matRRhigh))
+
+plot(x = names(plot_var_matRRfit),
+       y = plot_var_matRRfit,
+       xlab = "Lag", ylab = "OR",
+       main = paste0("Temperature:", " ", 19.4,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matRRlow), max(plot_var_matRRhigh)))  # plot of OR at variable = 19.4 relative to median
+polygon(x = c(names(plot_var_matRRhigh),
+              rev(names(plot_var_matRRlow))),
+        y = c(plot_var_matRRhigh,
+                rev(plot_var_matRRlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at variable = 19.4
+abline(h = 1) # add line at OR = 1
+```
+
+## Continuous Outcome
+
+Here, the day of the visit is when the continuous outcome is measured.
+
+Same set up for the predictor/exposure matrix no matter what form the outcome takes.
+
+Again, we have both a general dataframe (DLNM_model_df) that contains the outcome, covariates ("risk" here) and predictor/exposure/variable for a range of time and a predictor/exposure/variable matrix (temp_data) that only contains the predictor/exposure/variable for a range of time. The ordering of the rows should be the same between the two; each row should be for the same participant across both the general dataframe and the variable matrix.
+
+```{r}
+print("Data in 'lag' time order - Use this for DLNM cross basis")
+head(temp_data)
+```
+
+Setting up DLNM model parameters, same notes as before.
+
+```{r}
+# set up DLNM model parameters
+# predictor DLNM model parameters
+var_arg = list(fun = "bs", df = 4, degree = 3) # b-splines degree of freedom = 4 and degree of the piecewise polynomial = 3
+# lag DLNM model parameters
+lag_arg = list(fun = "bs", df = 4, degree = 3) # b-splines degree of freedom = 4 and degree of the piecewise polynomial = 3
+```
+
+Find the cross-basis matrix, same notes as before.
+
+```{r}
+# cross-basis matrix for DLNM
+# basis for the predictor and lag
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg)
+```
+
+Here, since outcome is the continuous outcome, family is set to "gaussian"
+
+```{r}
+model = glm(formula = outcome ~ cb + risk, data = continuous_DLNM_model_df, family = "gaussian") # model with cross-basis matrix. outcome column name of outcome in continuous_DLNM_model_df. risk is an adjusting covariate
+```
+
+Get predictions from the DLNM using crosspred.
+
+```{r}
+temp_median = round(median(as.vector(temp_data)), 1) # centering value (median)
+temp_median
+# generate predictions, set centering value as the median of all temperatures
+cpred = crosspred(basis = cb, model = model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+### Plot on grid of predictors and lags
+
+A plot of results for the whole grid of predictors and lags. The z-axis is effect on the continuous outcome; each pair of (variable, lag) values on the grid has an estimated effect.
+
+```{r}
+plot(cpred, ptype = "3d")
+```
+
+Slices can then be taken along the predictor/exposure dimension or the lag dimension to get a 2-dimensional plot.
+
+### Plot at a specific predictor/exposure slice.
+
+This plot uses the dlnm package's plot function (plot.crosspred, which can be called with plot()); ptype = "slices". To plot at a specific predictor/exposure/variable value, specify the value using the "var" argument in the function. In this example, we plot at the third quartile of 19.4 degrees.
+
+The predictions should be interpreted as estimated associations of a specific variable at a specific value relative to the reference value.
+
+Plot interpretation: An exposure of 19.4 degrees, relative to the median 10.6 degrees, is significantly associated with a higher outcome on the day of the visit (lag = 1). This also true for the day before/lag = 2, but to a lesser degree (smaller effect size than at lag = 1).
+
+Notice here that the line of no effect is at 0 (effect on outcome = 0) for the continuous outcome; instead of at OR = 1 as when outcome was binary. 
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1) # third quartile of temperature
+temp_third_quartile = as.numeric(temp_third_quartile)
+
+plot(cpred, ptype = "slices", var = temp_third_quartile, ylab = "Effect on Outcome", xlab = "Lag", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Temperature:", temp_third_quartile))
+```
+
+The same rules of slicing only at values provided during prediction applies.
+
+
+### plot at a specific lag slice.
+
+This plot uses the dlnm package's plot function (plot.crosspred, which can be called with plot()); ptype = "slices". To plot at a specific lag value, specify the value using the "lag" argument in the function. Here, we plot at lag = 1 and lag = 2. Same explanations as before on why lag = 1 is the day of the visit and lag = 2 is the day before the visit.
+
+Notice that the estimated effect on the outcome goes to 0 (no effect on outcome) at the median temperature 10.6, since the median temperature was set as the reference value.
+
+Plot interpretation:
+
+On the day of the visit (lag = 1), higher temperatures relative to the median temperature is significantly associated with higher outcome values; lower temperatures relative to the median temperature is significantly associated with lower outcome values. At the lowest temperatures, there is a signal for higher outcome values when compared to the median temperature, but significance is not reached.
+
+For the day before the visit (lag = 2), higher temperatures relative to the median temperature are significantly associated with higher odds of the event happening; lower temperatures relative to the median temperature are significantly associated with lower odds of the event happening. The effect sizes are smaller than on the day of the visit though.
+
+The confidence interval gets wider at the lowest temperatures. This can happen due to the sparsity of data at those temperatures.
+
+```{r}
+plot(cpred, ptype = "slices", lag = 1, ylab = "Effect on Outcome", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 1))
+
+plot(cpred, ptype = "slices", lag = 2, ylab = "Effect on Outcome", xlab = "Temperature \u00B0C", col=1,lwd=3, lwd=3,  cex.axis=1.5, ci.arg=list(col=8), main=paste("Lag", 2))
+```
+
+The sparsity of temperatures below -20 at lag = 2 can be seen in the following histogram (lag = 2 corresponds to day = 7 in this example).
+
+```{r}
+hist(continuous_DLNM_model_df$temp.day7, main = "Distribution of temperatures at lag = 2", xlab = "Temperature")
+```
+
+### Overall effect for a specific temperature
+
+The overall effect (cumulative associations over the whole lag period) for a specific predictor/exposure value can be found using the following code.
+
+Since the outcome is now continuous, we use the cumulative associations stored in allfit and its confidence interval is stored in alllow and allhigh.
+
+Over the whole lag period, the cumulative effect associated with exposure at 19.4, when compared to the median exposure of 10.6, is 6.62 (95% confidence interval (5.08, 8.16)).
+
+```{r}
+temp_third_quartile = round(quantile(as.vector(temp_data), 0.75), 1)
+print(paste0("Third Quartile: ", temp_third_quartile))
+all_thirdquantile = cbind(cpred$alllow[names(cpred$alllow) == temp_third_quartile], 
+                            cpred$allfit[names(cpred$allfit) == temp_third_quartile],
+                            cpred$allhigh[names(cpred$allhigh) == temp_third_quartile])
+colnames(all_thirdquantile) = c("alllow", "allfit", "allhigh")
+all_thirdquantile
+```
+
+### Obtaining the predicted associations and confidence intervals
+
+Since the outcome is continuous, to get the predicted associations/effect size (the values that makes up the lines in the slice plots) and the confidence intervals of the predicted associations/ effect size (the values that make up the boundaries of the shaded regions in the slice plots), you use the following arguments: matfit, matlow, and mathigh (these are the associations exponentiated - so it's the odds ratio).
+
+In the example below, the code recreates the slice plot at a specific predictor/exposure/variable value by obtaining values from matfit, matlow, and mathigh at the specific value. This allows for easy customization of the slice plot.
+
+```{r}
+plot_var = 19.4
+plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
+plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
+
+plot(x = names(plot_var_matfit),
+       y = plot_var_matfit,
+       xlab = "Lag", ylab = "Effect on Outcome",
+       main = paste0("Temperature:", " ", 19.4,"\u00B0 C"),
+       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 19.4 relative to median
+polygon(x = c(names(plot_var_mathigh),
+              rev(names(plot_var_matlow))),
+        y = c(plot_var_mathigh,
+                rev(plot_var_matlow)),
+        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 19.4
+abline(h = 0) # add line at effect size = 0
+```
+
+# Function to find best model parameters for DLNM: BIC
+
+```{r}
+# function that does a grid search over DLNM parameters to find the best model
+
+fit_DLNMs_glm = function(args_list, exposure_data, min_lag, max_lag, model_data, outcome, covars, glm_family, verbose = TRUE){
+  # function inputs
+  # args_list: list of DLNM parameters to try (list of lists)
+  # exposure_data: matrix of exposure history data. columns should be in reverse time order (in other words, in lag order). first column is exposure from the last day, last column exposure from the first day
+  # min_lag: numeric, minimum lag to use in DLNM. Note: DLNM starts counting lags from 1.
+  # max_lag: numeric: maximum lag to use in DLNM
+  # model_data: dataframe with outcome and all covariate data. each row should be for the same participant across both model_data and exposure_data.
+  # outcome: character string, the outcome column name
+  # covars: a vector of character strings, vector containing the column names of the adjusting covariates
+  # glm_family: character string, specifying the link function
+  # verbose: logical, indicates if best (lowest BIC) model parameters should be printed. default: TRUE
+  
+  # returns a named list containing a dataframe with the BIC of all the model parameter argument combinations for lag and variable;
+  # the DLNM model parameters used for the variable in the best model and then the DLNM model parameters used for the lag in the best model
+  # best model defined as model with lowest BIC
+  
+  num_args = length(args_list) # number of different DLNM model parameters
+  indices = seq(1, num_args, 1) # indices for the DLNM model parameters
+  combo_indices = cbind(t(matrix(rep(indices, 2), ncol = 2)), combn(indices, 2)) # all combinations of the DLNM model parameters. used by for-loop.
+  
+  BIC = rep(NA, ncol(combo_indices)) # initialize for BIC vector
+  smallest_BIC = Inf; smallest_BIC_i = NA # initialize, to store the smallest BIC value/ the index of DLNM argument combination that resulted in the smallest BIC
+  
+  return_df = data.frame(matrix(NA, nrow = ncol(combo_indices), ncol = 4)) # initialize dataframe to return with AIC and BIC
+  colnames(return_df) = c("DLNM_argvar", "DLNM_arglag", "AIC", "BIC")
+  
+  base_GLM_formula_str = paste(outcome, " ~ ", do.call(paste, c(as.list(covars), sep = " + ")), sep = "") # formula besides the cross basis, each for loop gets own crossbasis
+  
+  for(i in 1:ncol(combo_indices)){ # for all combinations of the DLNM model parameters
+    ind1 = combo_indices[1, i]; ind2 = combo_indices[2, i] # get the appropriate indices for DLNM model parameter for loop i
+    # cross-basis matrix for DLNM
+    cb = crossbasis(exposure_data, lag = c(min_lag, max_lag), argvar = args_list[[ind1]], arglag = args_list[[ind2]])
+    # model with crossbasis
+    model = glm(formula = update(as.formula(base_GLM_formula_str), ~ . + cb), data = model_data, family = glm_family)
+    BIC_i = BIC(model) # get i-th BIC
+    BIC[i] = BIC_i # fill in BIC vector
+    if(BIC_i < smallest_BIC){ # if the i-th BIC is the smallest so far, update smallest_AIC
+      smallest_BIC = BIC_i
+      smallest_BIC_i = i
+    }
+    # update returned data frame with AIC, BIC
+    return_df[i, "DLNM_argvar"] = paste(names(args_list[[ind1]]), args_list[[ind1]], sep = ":", collapse = ", ")
+    return_df[i, "DLNM_arglag"] = paste(names(args_list[[ind2]]), args_list[[ind2]], sep = ":", collapse = ", ")
+    return_df[i, "AIC"] = AIC(model)
+    return_df[i, "BIC"] = BIC_i
+  }
+  
+  if(verbose){ # print the best model parameters (best defined here as lowest AIC)
+    best_var_arg = combo_indices[1, smallest_BIC_i] # best model parameters for predictor/exposure
+    best_lag_arg = combo_indices[2, smallest_BIC_i] # best model parameters for lag
+    print(paste("var: ", paste(names(args_list[[best_var_arg]]), args_list[[best_var_arg]], sep = ": ", collapse = ", ")))
+    print(paste("lag: ", paste(names(args_list[[best_lag_arg]]), args_list[[best_lag_arg]], sep = ": ", collapse = ", ")))
+  }
+  return(list(results = return_df, 
+              minBIC_argvar = args_list[[combo_indices[1, smallest_BIC_i]]], 
+              minBIC_arglag = args_list[[combo_indices[2, smallest_BIC_i]]]))
+}
+```
+
+## grid of model parameters to search over
+
+Previously, we directly set the crossbasis' model parameters (argvar and arglag).
+
+This extension searches over a grid of model parameters for both the variable and lag dimensions in the crossbasis.
+
+These model parameters offer a balance of complexity and interpretability/simplicity. A different application may necessitate different model parameters.
+
+It is a grid search because the function code tries out each of the b-splines for both the predictor/exposure/variable dimension and the lag dimension, for all possible pairings.
+
+```{r}
+args = list(list(fun = "bs", df = 4, degree = 2),
+            list(fun = "bs", df = 5, degree = 2),
+            list(fun = "bs", df = 4, degree = 3),
+            list(fun = "bs", df = 5, degree = 3)
+            )
+```
+
+## Binary Outcome
+
+Function prints out and returns the best model parameters for variable and lag dimension.
+
+```{r}
+dlnm_result = fit_DLNMs_glm(args_list = args, 
+                            exposure_data = temp_data,               # temperature matrix as before. columns should be in reverse time order (in lag order)
+                            min_lag = 1, max_lag = ncol(temp_data), # set the minimum lag and maximum lag. the function fits to lags with increments of 1.
+                            model_data = DLNM_model_df, # model data that should contain outcome and covariates
+                            outcome = "outcome", # outcome column name
+                            covars = c("risk"),  # list of covariate column names
+                            glm_family = "binomial"(link='logit') # specify the glm (generalized linear model) link function. binomial here because binary outcome
+                            )
+```
+
+The best model parameters for variable and lag dimensions, as determined by the BIC.
+
+```{r}
+dlnm_result$minBIC_argvar
+dlnm_result$minBIC_arglag
+```
+
+Extract the best result from the fit_DLNMs_glm function output and then proceed as before with the cpred.
+
+```{r}
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = dlnm_result$minBIC_argvar, arglag = dlnm_result$minBIC_arglag)
+model = glm(formula = outcome ~ cb + risk, data = DLNM_model_df, family = "binomial"(link='logit'))
+cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+Then proceed as before.
+
+## Continuous Outcome
+
+Function prints out and returns the best model parameters for variable and lag dimension.
+
+```{r}
+dlnm_result = fit_DLNMs_glm(args_list = args, 
+                            exposure_data = temp_data,               # temperature matrix as before. columns should be in reverse time order (in lag order)
+                            min_lag = 1, max_lag = ncol(temp_data), # set the minimum lag and maximum lag. the function fits to lags with increments of 1.
+                            model_data = continuous_DLNM_model_df, # model data that should contain outcome and covariates
+                            outcome = "outcome", # outcome column name
+                            covars = c("risk"),  # list of covariate column names
+                            glm_family = "gaussian" # specify the glm (generalized linear model) link function. binomial here because binary outcome
+                            )
+```
+
+The best model parameters for variable and lag dimensions, as determined by the BIC. Different model parameters for the variable dimension than was used previously.
+
+```{r}
+dlnm_result$minBIC_argvar
+dlnm_result$minBIC_arglag
+```
+
+Extract the best result from the fit_DLNMs_glm function output and then proceed as before with the cpred.
+
+```{r}
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = dlnm_result$minBIC_argvar, arglag = dlnm_result$minBIC_arglag)
+model = glm(formula = outcome ~ cb + risk, data = continuous_DLNM_model_df, family = "gaussian")
+cpred = crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+```
+
+Then proceed as before.
+
