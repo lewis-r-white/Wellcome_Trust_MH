@@ -234,10 +234,22 @@ crisis_recode <- crisis_recode %>%
     resilience_score = ifelse(total_events > 0, 1 - (total_negative_responses / total_events), NA)
   ) %>%
   
+  #recateogrize NDS to low, moderate, high
+  mutate(sum_nds_category = factor(
+    case_when(sum_nds <= 2 ~ "low",
+              sum_nds >= 3 & sum_nds <= 5 ~ "moderate",
+              sum_nds >= 6 ~ "high"),
+    levels = c("low", "moderate", "high"),
+    ordered = TRUE
+  )) %>%
+  
+  # add delivery date
   left_join(delivery_date) %>% 
   
+  # calculate difference in time between delivery and survey date
   mutate(diffdays = difftime(datdeliv, quessetd, units = "days")) %>%
   
+  #classify survey date in relation to pregnancy period
   mutate(
     term_at_survey = case_when(
       diffdays > 42 ~ "far_postnatal",
