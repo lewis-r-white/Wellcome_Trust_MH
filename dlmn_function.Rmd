@@ -1,0 +1,1826 @@
+---
+title: "Results for Wellcome Trust Grant Proposal"
+output: html_document
+date: "2024-12-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# Load necessary libraries
+library(readxl)     # reading Excel files
+library(tidyverse)      # data manipulation
+library(labelled)   # labeling columns 
+library(here) # file paths
+library(haven)
+library(stargazer)
+library(dlnm)
+library(data.table)
+library(forcats) # For reordering factor levels
+library(broom)
+library(MASS)
+library(brant) # test proportional odds assumption for ordinal logistic regression
+# source in code to load and clean data
+
+## override mass::select and use dplyr as default
+select <- dplyr::select 
+
+source(here("clean_stress_data.R")) # pss_recode and crisis_recode and the output datasets of interest
+
+## Load WBT data
+WBT_daily_max <- read_csv(here("data", "Ghana-Tw-Extract.csv")) %>%
+  filter(time > as.Date("2013-01-01")) %>%
+  dplyr::select(community, time, twx) %>% # select relevant columns 
+  mutate(community = str_remove(community, "_manual$")) %>% #remove _manual from communities so join works (_manual values appear to be same as community without _manual)
+  distinct() # remove duplicates from "_manual" removal step above. The temp measurements were the same for each. 
+
+
+era5 <- read_csv(here("data", "GRAPHS-ERA5-CHIRPS", "GRAPHS-ERA5-Heatstress-Tw-1991missing.csv")) %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  mutate(community = case_when(community == "AKORA/AT" ~ "AKORA",
+                               TRUE ~ community))
+
+
+```
+
+# PSS
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# LOAD THE PSS DATA
+pss_simple <- pss_recode %>% 
+  select(mstudyid, survey_datetime, PSS4, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>% # select variables of interest 
+  mutate(survey_date = as.Date(survey_datetime)) %>%  # Extract the date part of survey_datetime 
+  mutate(survey_pre_post_birth = fct_relevel(survey_pre_post_birth, "pre_delivery", "post_delivery")) %>%
+#focus on surveys before pregnancy 
+  filter(survey_pre_post_birth == "pre_delivery") %>%
+  filter(term_at_survey != "second_trimester")
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+## FUNCTION TO AUTOMATE DLM ACROSS METRICS 
+run_dlm_analysis <- function(pss_data, era5_data, metric, start_date = "2013-01-01") {
+  library(dlnm)
+  library(dplyr)
+  library(tidyr)
+  library(splines)
+  
+  # Step 1: process temperature data for the selected metric
+  process_temperature_data <- function(era5_data, metric) {
+    era5_data %>%
+      filter(date > as.Date(start_date)) %>%
+      select(community, date, !!sym(metric)) %>%
+      rename(temp_metric = !!sym(metric)) %>%
+      mutate(community = str_remove(community, "_manual$")) %>%
+      distinct()
+  }
+  
+  # Step 2: create temperature lags
+  create_temperature_lags <- function(pss_data, temp_data) {
+    pss_data %>%
+      select(mstudyid, vname, survey_date) %>%
+      mutate(start_date = survey_date - 270) %>%
+      rowwise() %>%
+      mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%
+      unnest(lag_dates) %>%
+      rename(date = lag_dates) %>%
+      left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+  }
+  
+  # Step 3: process metric data and generate lagged dataset
+  temp_data <- process_temperature_data(era5_data, metric)
+  temperature_lags <- create_temperature_lags(pss_data, temp_data)
+  
+  # Step 4: create wide-format lagged data
+  temperature_lags_wide <- temperature_lags %>%
+    mutate(lag = as.numeric(survey_date - date)) %>%
+    pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+    select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+    group_by(mstudyid, survey_date) %>%
+    reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+    left_join(pss_data %>% select(mstudyid, survey_date, PSS4), by = c("mstudyid", "survey_date")) %>%
+    filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+  
+  # Step 5: cross-basis matrix
+  temp_data_matrix <- temperature_lags_wide %>%
+    select(starts_with("temp_lag_")) %>%
+    as.matrix()
+  
+  var_arg <- list(fun = "bs", df = 4, degree = 3)
+  lag_arg <- list(fun = "bs", df = 4, degree = 3)
+  cb <- crossbasis(temp_data_matrix, lag = c(1, ncol(temp_data_matrix)), argvar = var_arg, arglag = lag_arg)
+  
+  # Step 6: fit the model
+  model <- glm(formula = PSS4 ~ cb, data = temperature_lags_wide, family = "gaussian")
+  
+  # Step 7: predictions
+  temp_median <- round(median(as.vector(temp_data_matrix), na.rm = TRUE), 1)
+  cpred <- crosspred(cb, model, ci.level = 0.95, cen = temp_median, by = 0.1)
+  
+  # Step 8: contour plot
+  
+  # Generate contour plot and store it
+  plot(
+    cpred, 
+    "contour", 
+    main = paste("Effects of", metric, "on PSS Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+    xlab = "Temperature (°C)", 
+    ylab = "Lag (days)", 
+    key.title = title(main = "Change \nin PSS", cex.main = 0.8)
+  )
+  contour_plot <- recordPlot()  # Save the plot
+  
+  
+  # Step 9: examine lag effect at the 99th percentile
+  temp_top_pt_pct <- round(quantile(as.vector(temp_data_matrix), 0.99, na.rm = TRUE), 1)
+  plot_var <- temp_top_pt_pct
+  
+  # Extract predictions at the top percentile
+  plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+  names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+  plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+  names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+  plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+  names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+  
+  # Generate lag effect plot and store it
+  plot(
+    x = names(plot_var_matfit),
+    y = plot_var_matfit,
+    xlab = "Lag (days)", ylab = "Effect on Perceived Stress Score (PSS)",
+    main = paste0("At the 99th Temperature Percentile (", temp_top_pt_pct, "°C), \nEffect of ", metric, " Temperature on PSS"),
+    type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+  )
+  polygon(
+    x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+    y = c(plot_var_mathigh, rev(plot_var_matlow)),
+    col = rgb(0, 0, 0, alpha = 0.2), border = NA
+  )
+  abline(h = 0, lty = 2)
+  
+  lag_effect_plot <- recordPlot()  # Save the plot
+  
+  # Return results
+  list(
+    model = model, 
+    cpred = cpred, 
+    temp_top_pt_pct = temp_top_pt_pct, 
+    contour_plot = contour_plot,
+    lag_effect_plot = lag_effect_plot
+  )
+}
+```
+
+## Max Temperature Metrics
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+# Example: Run for multiple metrics
+metrics <- c("max_hi", "max_tw", "max_wbgt", "max_t2mC")
+
+results <- lapply(metrics, function(metric) {
+  run_dlm_analysis(pss_simple, era5, metric)
+})
+
+```
+
+## Min Temperature Metrics
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+# Example: Run for multiple metrics
+metrics <- c("min_hi", "min_tw", "min_wbgt", "min_t2mC")
+
+results <- lapply(metrics, function(metric) {
+  run_dlm_analysis(pss_simple, era5, metric)
+})
+
+```
+
+## Mean Temperature Metrics 
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+# Example: Run for multiple metrics
+metrics <- c("mean_hi", "mean_tw", "mean_wbgt", "mean_t2mC")
+
+results <- lapply(metrics, function(metric) {
+  run_dlm_analysis(pss_simple, era5, metric)
+})
+```
+
+
+
+# Sum NDS Category (Crysis Data)
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+### LOAD THE CRYSIS DATA
+
+## CRYSIS data
+crisis_simple <- crisis_recode %>%
+  mutate(
+    quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
+    quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
+    survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
+    select(mstudyid, fin_events:survey_datetime, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
+  select(-c(crireadneg:crikidneg)) %>%
+  mutate(survey_date = as.Date(survey_datetime))  # Extract the date part of survey_datetime
+
+```
+
+## Max Temperature Metrics 
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+temp_metric = "max_hi"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "max_tw"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "max_wbgt"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "max_t2mC"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+
+
+## Min Temperature Metrics 
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+temp_metric = "min_hi"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "min_tw"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "min_wbgt"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "min_t2mC"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+
+
+## Mean Temperature Metrics 
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+temp_metric = "mean_hi"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "mean_tw"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "mean_wbgt"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+temp_metric = "mean_t2mC"
+
+temp_data <- era5 %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  select(community, date, max_hi:range_tw) %>%
+  mutate(community = str_remove(community, "_manual$")) %>%
+  distinct()
+
+
+# Create a sequence of dates for each survey date with lags (LONG FORMAT)
+temperature_lags <- crisis_simple %>%
+  select(mstudyid, vname, survey_date) %>%
+  mutate(start_date = survey_date - 270) %>%  # define the start of the window
+  rowwise() %>% # perform following operations for each row
+  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+  unnest(lag_dates) %>%  # expand rows for each date in the list above
+  rename(date = lag_dates) %>%
+
+# Join with temperature data 
+  left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+
+# Adjust data set so each lag value is own column (WIDE FORMAT)
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+
+temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+  as.matrix()
+
+
+# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+
+# cross-basis matrix for DLNM
+cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
+
+
+
+# GET PREDICTIONS (in reference to median temp)
+temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+
+# generate predictions for a DLNM, set centering value as the median of all temperatures
+cpred = crosspred(cb, 
+                  model_polr, 
+                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+                  cen = temp_median, # predictions are relative to this baseline temperature.
+                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+
+
+# Generate contour plot and store it
+plot(
+  cpred, 
+  "contour", 
+  main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+  xlab = "Temperature (°C)", 
+  ylab = "Lag (days)", 
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8))
+
+  
+# examine lag effect at the 99th percentile
+temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+plot_var <- temp_top_pct
+
+# Extract predictions at the top percentile
+plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+
+# Generate lag effect plot and store it
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", ylab = "Effect on Sum NDS Category",
+  main = paste0("99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " on Sum NDS Category"),
+  type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), border = NA
+)
+abline(h = 0, lty = 2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# analyze_temp_metric <- function(temp_metric) {
+#   
+#   temp_data <- era5 %>%
+#     filter(date > as.Date("2013-01-01")) %>%
+#     select(community, date, max_hi:range_tw) %>%
+#     mutate(community = str_remove(community, "_manual$")) %>%
+#     distinct()
+#   
+#   
+#   # Create a sequence of dates for each survey date with lags (LONG FORMAT)
+#   temperature_lags <- crisis_simple %>%
+#     select(mstudyid, vname, survey_date) %>%
+#     mutate(start_date = survey_date - 270) %>%  # define the start of the window
+#     rowwise() %>% # perform following operations for each row
+#     mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
+#     unnest(lag_dates) %>%  # expand rows for each date in the list above
+#     rename(date = lag_dates) %>%
+#     
+#     # Join with temperature data 
+#     left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+#   
+#   # Adjust data set so each lag value is own column (WIDE FORMAT)
+#   temperature_lags_wide <- temperature_lags %>%
+#     mutate(lag = as.numeric(survey_date - date)) %>%
+#     pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+#     select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+#     group_by(mstudyid, survey_date) %>%
+#     reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+#     left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+#     filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+#   
+#   temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+#     as.matrix()
+#   
+#   
+#   # predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+#   var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+#   
+#   # lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+#   lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+#   
+#   # cross-basis matrix for DLNM
+#   cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+#   
+#   # ordered logistic regression model
+#   model_polr <- polr(
+#     formula = sum_nds_category ~ cb,
+#     data = temperature_lags_wide,
+#     method = "logistic" 
+#   )
+#   
+#   
+#   
+#   # GET PREDICTIONS (in reference to median temp)
+#   temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+#   
+#   # generate predictions for a DLNM, set centering value as the median of all temperatures
+#   cpred = crosspred(cb, 
+#                     model_polr, 
+#                     ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+#                     cen = temp_median, # predictions are relative to this baseline temperature.
+#                     by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+#   
+#   
+#   # Generate contour plot and store it
+#   plot(
+#     cpred, 
+#     "contour", 
+#     main = paste("Effects of ", temp_metric, " on Sum NDS Category Relative to \nMedian Temperature (", temp_median, "°C)", sep = ""), 
+#     xlab = "Temperature (°C)", 
+#     ylab = "Lag (days)", 
+#     key.title = title(main = "Change in \nNDS Category", cex.main = 0.8))
+#   
+#   
+#   # examine lag effect at the 99th percentile
+#   temp_top_pct <- round(quantile(as.vector(temp_data), 0.99, na.rm = TRUE), 1)
+#   plot_var <- temp_top_pct
+#   
+#   # Extract predictions at the top percentile
+#   plot_var_matfit <- cpred$matfit[rownames(cpred$matfit) == plot_var, ]
+#   names(plot_var_matfit) <- sub("lag", "", names(plot_var_matfit))
+#   plot_var_matlow <- cpred$matlow[rownames(cpred$matlow) == plot_var, ]
+#   names(plot_var_matlow) <- sub("lag", "", names(plot_var_matlow))
+#   plot_var_mathigh <- cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
+#   names(plot_var_mathigh) <- sub("lag", "", names(plot_var_mathigh))
+#   
+#   # Generate lag effect plot and store it
+#   plot(
+#     x = names(plot_var_matfit),
+#     y = plot_var_matfit,
+#     xlab = "Lag (days)", ylab = "Effect on Perceived Stress Score (PSS)",
+#     main = paste0("At the 99th Temperature Percentile (", temp_top_pct, "°C), \nEffect of ", temp_metric, " Temperature on PSS"),
+#     type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+#   )
+#   polygon(
+#     x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+#     y = c(plot_var_mathigh, rev(plot_var_matlow)),
+#     col = rgb(0, 0, 0, alpha = 0.2), border = NA
+#   )
+#   abline(h = 0, lty = 2)
+#   
+# }
+# 
+# 
+# analyze_temp_metric("max_hi")
+# analyze_temp_metric("max_tw")
+# analyze_temp_metric("max_wbgt")
+# analyze_temp_metric("max_t2mC")
+# 
+# analyze_temp_metric("min_hi")
+# analyze_temp_metric("min_tw")
+# analyze_temp_metric("min_wbgt")
+# analyze_temp_metric("min_t2mC")
+# 
+# analyze_temp_metric("mean_hi")
+# analyze_temp_metric("mean_tw")
+# analyze_temp_metric("mean_wbgt")
+# analyze_temp_metric("mean_t2mC")
+```
+
+
+
+
+
+
+```{r, include=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+# # Step 1: process temperature data for the selected metric
+# process_temperature_data <- function(era5_data, metric, start_date = "2013-01-01") {
+#   era5_data %>%
+#     filter(date > as.Date(start_date)) %>%
+#     select(community, date, !!sym(metric)) %>%
+#     rename(temp_metric = !!sym(metric)) %>%
+#     mutate(community = str_remove(community, "_manual$")) %>%
+#     distinct()
+# }
+# 
+# # Step 2: create temperature lags
+# create_temperature_lags <- function(crisis_data, temp_data) {
+#   crisis_data %>%
+#     select(mstudyid, vname, survey_date) %>%
+#     mutate(start_date = survey_date - 270) %>%
+#     rowwise() %>%
+#     mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%
+#     unnest(lag_dates) %>%
+#     rename(date = lag_dates) %>%
+#     left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+# }
+# 
+# # Step 3: process metric data and generate lagged dataset
+# temp_data <- process_temperature_data(era5, "max_hi")
+# temperature_lags <- create_temperature_lags(crisis_simple, temp_data)
+# 
+# # Step 4: create wide-format lagged data
+# temperature_lags_wide <- temperature_lags %>%
+#   mutate(lag = as.numeric(survey_date - date)) %>%
+#   pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+#   select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+#   group_by(mstudyid, survey_date) %>%
+#   reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+#   left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+#   filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+# 
+# # Step 5: cross-basis matrix
+# temp_data_matrix <- temperature_lags_wide %>%
+#   select(starts_with("temp_lag_")) %>%
+#   as.matrix()
+# 
+# 
+# # predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+# var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+# 
+# # lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+# lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+# 
+# # cross-basis matrix for DLNM
+# cb = crossbasis(temp_data_matrix, lag = c(1, ncol(temp_data_matrix)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+# 
+# # ordered logistic regression model
+# model_polr <- polr(
+#   formula = sum_nds_category ~ cb,
+#   data = temperature_lags_wide,
+#   method = "logistic" 
+# )
+# 
+# 
+# 
+# # GET PREDICTIONS (in reference to median temp)
+# temp_median <- round(median(as.vector(temp_data_matrix)), 1) # centering value (median). 
+# 
+# # generate predictions for a DLNM, set centering value as the median of all temperatures
+# cpred = crosspred(cb, 
+#                   model_polr, 
+#                   ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+#                   cen = temp_median, # predictions are relative to this baseline temperature.
+#                   by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+# 
+# 
+# # plot contour map of 3d plot
+# plot(
+#   cpred, 
+#   "contour", 
+#   main = "Effects of Temperature and Lag on Log Odds of Higher Stress Category \nRelative to Median Temperature (26°C)", 
+#   xlab = "Temperature (°C)", 
+#   ylab = "Lag (days)", 
+#   key.title = title(main = "Change in \nLog Odds", cex.main = 0.8)
+# )
+
+
+
+
+### Distributed Lag Model (DLM)
+
+# NON-FUNCTION VERSION TO MAKE SURE I UNDERSTAND THE PROCESS 
+# ```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# # Define a function to process temperature data for a selected metric
+# process_temperature_data <- function(era5_data, metric) {
+#   era5_data %>%
+#     select(community, date, !!sym(metric)) %>% # Dynamically select the metric column
+#     rename(temp_metric = !!sym(metric)) %>%    # Rename for consistency
+#     mutate(community = str_remove(community, "_manual$")) %>% 
+#     distinct() # Remove duplicates
+# }
+# 
+# 
+# # Define function to create temperature lags
+# create_temperature_lags <- function(pss_data, temp_data) {
+#   # Generate lags and join with temperature data
+#   temperature_lags <- pss_data %>%
+#     select(mstudyid, vname, survey_date) %>%
+#     mutate(start_date = survey_date - 270) %>%
+#     rowwise() %>%
+#     mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%
+#     unnest(lag_dates) %>%
+#     rename(date = lag_dates) %>%
+#     left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+#   
+#   # Return the lagged data
+#   temperature_lags
+# }
+# 
+# 
+# # Process temperature data for a metric
+# temp_data <- process_temperature_data(era5, "max_hi")
+# 
+# # Create lags and join with PSS data
+# temperature_lags <- create_temperature_lags(pss_simple, temp_data)
+# 
+# 
+# temperature_lags_wide <- temperature_lags %>%
+#   mutate(lag = as.numeric(survey_date - date)) %>%
+#   pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+#   select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+#   group_by(mstudyid, survey_date) %>%
+#   reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+#   left_join(pss_simple %>% select(mstudyid, survey_date, PSS4), by = c("mstudyid", "survey_date")) %>%
+#   filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
+# 
+# temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+#   as.matrix()
+# 
+# 
+# 
+# ## SET UP PARAMS
+# # predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
+# var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+# 
+# # lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
+# lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
+# 
+# # cross-basis matrix for DLNM
+# cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+# 
+# ## FIT MODEL
+# model = glm(formula = PSS4 ~ cb, data = temperature_lags_wide, family = "gaussian") # stress scores continuous and normally dist, so gaussian family appropriate
+# 
+# 
+# # GET PREDICTIONS (in reference to median temp)
+# temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+# 
+# # generate predictions for a DLNM, set centering value as the median of all temperatures
+# cpred = crosspred(cb, 
+#                   model, 
+#                   ci.level = 0.95, # 95% confidence intervals calculated around predicted values
+#                   cen = temp_median, # predictions are relative to this baseline temperature.
+#                   by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
+# 
+# # plot contour map of 3d plot
+# plot(
+#   cpred, 
+#   "contour", 
+#   main = "Effects of Temperature and Lag on PSS Relative to \nMedian Temperature (26°C)", 
+#   xlab = "Temperature (°C)", 
+#   ylab = "Lag (days)", 
+#   key.title = title(main = "Change \nin PSS", cex.main = 0.8)
+# )
+
+```
+
+
+
+
+
+
+
+
+
