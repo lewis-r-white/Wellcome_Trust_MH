@@ -25,7 +25,7 @@ library(forcats) # For reordering factor levels
 
 source(here("clean_stress_data.R")) # pss_recode and crisis_recode and the output datasets of interest
 
-source(here("explore_weather_data.R")) # wbgt_cascade and heat_averages are outputs of interest 
+source(here("explore_weather_data.R")) # WBT_daily_max and heat_averages are outputs of interest 
 ```
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
@@ -45,7 +45,7 @@ crisis_simple <- crisis_recode %>%
 
 
 # adjust community names cascade data to make sure they match with PSS
-wbgt_cascade_simple <- wbgt_cascade %>%
+WBT_daily_max_simple <- WBT_daily_max %>%
   select(community, time, twx) %>%
   mutate(community = str_remove(community, "_manual$"))
 ```
@@ -308,7 +308,7 @@ ggplot(nds_count_data, aes(x = sum_nds, y = n)) +
 ### Distribution of WBT (TWx) Data
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
-temp_boxplot_ordered_data <- wbgt_cascade_simple %>%
+temp_boxplot_ordered_data <- WBT_daily_max_simple %>%
   mutate(community = fct_reorder(community, twx, .fun = median, na.rm = TRUE))
 
 ggplot(temp_boxplot_ordered_data, aes(x = community, y = twx)) +
@@ -342,11 +342,11 @@ pss_simple <- pss_simple %>%
 prior_periods <- c(1, 2, 3, 4, 5, 6)
 
 # Function to calculate average temperature for a specific period
-calc_monthly_temp_avg <- function(stress_data, wbgt_data, period) {
+calc_monthly_temp_avg <- function(stress_data, temp_data, period) {
   stress_data %>%
     rowwise() %>%  # Perform operations for each row (unique survey observation)
     mutate(
-      !!paste0("avg_temp_", period, "_months_prior") := wbgt_data %>%  # Create a dynamic column name
+      !!paste0("avg_temp_", period, "_months_prior") := temp_data %>%  # Create a dynamic column name
         filter(
           community == vname,  # Match the community where the participant resides
           time >= survey_date - (period * 30) & time < survey_date - ((period - 1) * 30)  # Filter by dynamic date range
@@ -358,36 +358,36 @@ calc_monthly_temp_avg <- function(stress_data, wbgt_data, period) {
 }
 
 
-calc_custom_temp_avg <- function(stress_data, wbgt_data) {
+calc_custom_temp_avg <- function(stress_data, temp_data) {
   stress_data %>%
     rowwise() %>%  # Perform operations for each row (unique survey observation)
     mutate(
       # Temperature on the day of the survey
-      avg_temp_day_of_survey = wbgt_data %>%
+      avg_temp_day_of_survey = temp_data %>%
         filter(community == vname, time == survey_date) %>%
         summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
         pull(mean_temp),
       
       # Temperature the day before the survey
-      avg_temp_day_before_survey = wbgt_data %>%
+      avg_temp_day_before_survey = temp_data %>%
         filter(community == vname, time == survey_date - 1) %>%
         summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
         pull(mean_temp),
       
       # Average temperature for the week before the survey
-      avg_temp_week_before_survey = wbgt_data %>%
+      avg_temp_week_before_survey = temp_data %>%
         filter(community == vname, time >= survey_date - 7 & time < survey_date) %>%
         summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
         pull(mean_temp),
       
       # Average temperature for the 3 months before the survey
-      avg_temp_3_months_before = wbgt_data %>%
+      avg_temp_3_months_before = temp_data %>%
         filter(community == vname, time >= survey_date - 90 & time < survey_date) %>%
         summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
         pull(mean_temp),
       
       # Average temperature for the 6 months before the survey
-      avg_temp_6_months_before = wbgt_data %>%
+      avg_temp_6_months_before = temp_data %>%
         filter(community == vname, time >= survey_date - 180 & time < survey_date) %>%
         summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
         pull(mean_temp),
@@ -402,7 +402,7 @@ calc_custom_temp_avg <- function(stress_data, wbgt_data) {
       conception_date = datdeliv - gestage_days,
   
       # Pre-conception temperature average (60 days before conception)
-      avg_temp_pre_conception = wbgt_data %>%
+      avg_temp_pre_conception = temp_data %>%
         filter(
           community == vname,
           time >= conception_date - 60 & time < conception_date
@@ -411,7 +411,7 @@ calc_custom_temp_avg <- function(stress_data, wbgt_data) {
         pull(mean_temp),
       
       # First trimester temperature average
-      avg_temp_first_trimester = wbgt_data %>%
+      avg_temp_first_trimester = temp_data %>%
         filter(
           community == vname,
           time >= conception_date & time < conception_date + 90
@@ -420,7 +420,7 @@ calc_custom_temp_avg <- function(stress_data, wbgt_data) {
         pull(mean_temp),
       
       # Second trimester temperature average
-      avg_temp_second_trimester = wbgt_data %>%
+      avg_temp_second_trimester = temp_data %>%
         filter(
           community == vname,
           time >= conception_date + 91 & time < conception_date + 180
@@ -429,7 +429,7 @@ calc_custom_temp_avg <- function(stress_data, wbgt_data) {
         pull(mean_temp),
       
       # Third trimester temperature average
-      avg_temp_third_trimester = wbgt_data %>%
+      avg_temp_third_trimester = temp_data %>%
         filter(
           community == vname,
           time >= conception_date + 181 & time <= survey_date # only include up until the survey time
@@ -438,7 +438,7 @@ calc_custom_temp_avg <- function(stress_data, wbgt_data) {
         pull(mean_temp),
      
        # Average temperature across the entire pregnancy
-      avg_temp_entire_pregnancy = wbgt_data %>%
+      avg_temp_entire_pregnancy = temp_data %>%
         filter(
           community == vname,  
           time >= conception_date & time <= survey_date  # Filter pregnancy period estimated as 280 days before delivery. Only include up until the survey time. 
@@ -457,26 +457,26 @@ calc_custom_temp_avg <- function(stress_data, wbgt_data) {
 # # Loop through each period in prior_periods
 # for (period in prior_periods) {
 #   # Add a new column for the current period
-#   pss_simple_temp_lags <- calc_monthly_temp_avg(pss_simple_temp_lags, wbgt_cascade_simple, period)
+#   pss_simple_temp_lags <- calc_monthly_temp_avg(pss_simple_temp_lags, WBT_daily_max_simple, period)
 # }
 
 
 # Automate the calculation of average temperatures for all prior periods
 pss_simple_temp_lags <- reduce(prior_periods, function(df, period) {
-  calc_monthly_temp_avg(df, wbgt_cascade_simple, period)  # Apply the calculation for each period
+  calc_monthly_temp_avg(df, WBT_daily_max_simple, period)  # Apply the calculation for each period
 }, .init = pss_simple)  # Start with the initial dataset (pss_simple)
 
 
 # Add custom periods
-pss_simple_final <- calc_custom_temp_avg(pss_simple_temp_lags, wbgt_cascade_simple)
+pss_simple_final <- calc_custom_temp_avg(pss_simple_temp_lags, WBT_daily_max_simple)
 
 
 # Automate the calculation of average temperatures for all prior periods
 crisis_simple_temp_lags <- reduce(prior_periods, function(df, period) {
-  calc_monthly_temp_avg(df, wbgt_cascade_simple, period)  # Apply the calculation for each period
+  calc_monthly_temp_avg(df, WBT_daily_max_simple, period)  # Apply the calculation for each period
 }, .init = crisis_simple)  # Start with the initial dataset (crisis_simple)
 
-crisis_simple_final <- calc_custom_temp_avg(crisis_simple_temp_lags, wbgt_cascade_simple)
+crisis_simple_final <- calc_custom_temp_avg(crisis_simple_temp_lags, WBT_daily_max_simple)
 
 ```
 
@@ -487,7 +487,7 @@ crisis_simple_final <- calc_custom_temp_avg(crisis_simple_temp_lags, wbgt_cascad
 ### Focus on Temperature in Relation to Survey Data
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
-wbgt_models_pss <- list(
+wbt_daily_max_models_pss <- list(
   lm(PSS4 ~ avg_temp_day_of_survey, data = pss_simple_final),
   lm(PSS4 ~ avg_temp_day_before_survey, data = pss_simple_final),
   lm(PSS4 ~ avg_temp_week_before_survey, data = pss_simple_final),
@@ -497,7 +497,7 @@ wbgt_models_pss <- list(
 )
 
 # Display model summaries in a single compact table
-stargazer(wbgt_models_pss, type = "text", title = "Regression Results: PSS vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_pss, type = "text", title = "Regression Results: PSS vs. WBT Temperatures",
           column.labels = c("Day Of", 
                             "Day Prior", 
                             "Week Prior", 
@@ -517,7 +517,7 @@ No evidence of temperature effect on PSS.
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # Define models for PSS4
-wbgt_models_pss <- list(
+wbt_daily_max_models_pss <- list(
   lm(PSS4 ~ avg_temp_entire_pregnancy, data = pss_simple_final),
   lm(PSS4 ~ avg_temp_pre_conception, data = pss_simple_final),
   lm(PSS4 ~ avg_temp_first_trimester, data = pss_simple_final),
@@ -526,7 +526,7 @@ wbgt_models_pss <- list(
 )
 
 # Display model summaries for PSS4
-stargazer(wbgt_models_pss, type = "text", title = "Regression Results: PSS vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_pss, type = "text", title = "Regression Results: PSS vs. WBT Temperatures",
           column.labels = c("Entire Pregnancy", 
                             "Pre-Conception", 
                             "First Trimester", 
@@ -548,7 +548,7 @@ Some evidence of temperature effect on PSS. Higher temperatures during the 60 da
 #### Total Negative Response
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
-wbgt_models_negative <- list(
+wbt_daily_max_models_negative <- list(
   lm(total_negative_responses ~ avg_temp_day_of_survey, data = crisis_simple_final),
   lm(total_negative_responses ~ avg_temp_day_before_survey, data = crisis_simple_final),
   lm(total_negative_responses ~ avg_temp_week_before_survey, data = crisis_simple_final),
@@ -558,7 +558,7 @@ wbgt_models_negative <- list(
 )
 
 # Display model summaries in a single compact table
-stargazer(wbgt_models_negative, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_negative, type = "text", title = "Regression Results: Total Negative Responses vs. WBT Temperatures",
            column.labels = c("Day Of", 
                             "Day Prior", 
                             "Week Prior", 
@@ -578,7 +578,7 @@ No evidence of temperature effect on the number of negatively perceived events.
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 
-wbgt_models_sum_nds <- list(
+wbt_daily_max_models_sum_nds <- list(
   lm(sum_nds ~ avg_temp_day_of_survey, data = crisis_simple_final),
   lm(sum_nds ~ avg_temp_day_before_survey, data = crisis_simple_final),
   lm(sum_nds ~ avg_temp_week_before_survey, data = crisis_simple_final),
@@ -588,7 +588,7 @@ wbgt_models_sum_nds <- list(
 )
 
 # Display model summaries in a single compact table
-stargazer(wbgt_models_sum_nds, type = "text", title = "Regression Results: Sum NDS vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_sum_nds, type = "text", title = "Regression Results: Sum NDS vs. WBT Temperatures",
            column.labels = c("Day Of", 
                             "Day Prior", 
                             "Week Prior", 
@@ -608,7 +608,7 @@ No evidence of temperature effect on NDS score.
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 
-wbgt_models_resilience <- list(
+wbt_daily_max_models_resilience <- list(
   lm(resilience_score ~ avg_temp_day_of_survey, data = crisis_simple_final),
   lm(resilience_score ~ avg_temp_day_before_survey, data = crisis_simple_final),
   lm(resilience_score ~ avg_temp_week_before_survey, data = crisis_simple_final),
@@ -618,7 +618,7 @@ wbgt_models_resilience <- list(
 )
 
 # Display model summaries in a single compact table
-stargazer(wbgt_models_resilience, type = "text", title = "Regression Results: Resilience Score vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_resilience, type = "text", title = "Regression Results: Resilience Score vs. WBT Temperatures",
            column.labels = c("Day Of", 
                             "Day Prior", 
                             "Week Prior", 
@@ -640,7 +640,7 @@ No evidence of temperature effect on resilience score.
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 
 # Define models for Total Negative Responses
-wbgt_models_negative <- list(
+wbt_daily_max_models_negative <- list(
   lm(total_negative_responses ~ avg_temp_entire_pregnancy, data = crisis_simple_final),
   lm(total_negative_responses ~ avg_temp_pre_conception, data = crisis_simple_final),
   lm(total_negative_responses ~ avg_temp_first_trimester, data = crisis_simple_final),
@@ -650,7 +650,7 @@ wbgt_models_negative <- list(
 
 
 # Display model summaries for Total Negative Responses
-stargazer(wbgt_models_negative, type = "text", title = "Regression Results: Total Negative Responses vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_negative, type = "text", title = "Regression Results: Total Negative Responses vs. WBT Temperatures",
           column.labels = c("Entire Pregnancy", 
                             "Pre-Conception", 
                             "First Trimester", 
@@ -669,7 +669,7 @@ No evidence of temperature effect on the number of negatively perceived events.
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 
 # Define models for Total Negative Responses
-wbgt_models_sum_nds <- list(
+wbt_daily_max_models_sum_nds <- list(
   lm(sum_nds ~ avg_temp_entire_pregnancy, data = crisis_simple_final),
   lm(sum_nds ~ avg_temp_pre_conception, data = crisis_simple_final),
   lm(sum_nds ~ avg_temp_first_trimester, data = crisis_simple_final),
@@ -679,7 +679,7 @@ wbgt_models_sum_nds <- list(
 
 
 # Display model summaries for Total Negative Responses
-stargazer(wbgt_models_sum_nds, type = "text", title = "Regression Results: Sum NDS vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_sum_nds, type = "text", title = "Regression Results: Sum NDS vs. WBT Temperatures",
           column.labels = c("Entire Pregnancy", 
                             "Pre-Conception", 
                             "First Trimester", 
@@ -698,7 +698,7 @@ No evidence of temperature effect on NDS score.
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 
 # Define models for Total Negative Responses
-wbgt_models_resilience <- list(
+wbt_daily_max_models_resilience <- list(
   lm(resilience_score ~ avg_temp_entire_pregnancy, data = crisis_simple_final),
   lm(resilience_score ~ avg_temp_pre_conception, data = crisis_simple_final),
   lm(resilience_score ~ avg_temp_first_trimester, data = crisis_simple_final),
@@ -708,7 +708,7 @@ wbgt_models_resilience <- list(
 
 
 # Display model summaries for Total Negative Responses
-stargazer(wbgt_models_resilience, type = "text", title = "Regression Results: Resilience Score vs. WBGT Temperatures",
+stargazer(wbt_daily_max_models_resilience, type = "text", title = "Regression Results: Resilience Score vs. WBT Temperatures",
           column.labels = c("Entire Pregnancy", 
                             "Pre-Conception", 
                             "First Trimester", 
