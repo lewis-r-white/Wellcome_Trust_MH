@@ -31,7 +31,7 @@ source(here("load_actigraphy_data.R")) #combines actigraphy data to one dataset 
 # head(actigraphy_simple_full)
 
 # load in weather data for period of interest
-wbgt_cascade_actigraphy <- read_csv(here("data", "Ghana-Tw-Extract.csv")) %>% # TWx is max wet bulb temperature 
+WBT_daily_max_actigraphy <- read_csv(here("data", "Ghana-Tw-Extract.csv")) %>% # TWx is max wet bulb temperature 
   filter(time > as.Date("2018-01-01"),
          time < as.Date("2022-12-31")) %>%
   select(community, time, twx) %>% # select relevant columns 
@@ -42,7 +42,7 @@ wbgt_cascade_actigraphy <- read_csv(here("data", "Ghana-Tw-Extract.csv")) %>% # 
 actigraphy_with_temp <- actigraphy_simple_full %>%
   rowwise() %>%  # Process each row individually
   mutate(
-    avg_temp = wbgt_cascade_actigraphy %>%
+    avg_temp = WBT_daily_max_actigraphy %>%
       filter(
         community == vname,  # Match the community
         time >= Start.Date & time <= End.Date  # Filter by date range
