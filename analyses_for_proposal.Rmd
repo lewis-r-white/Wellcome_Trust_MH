@@ -1,7 +1,8 @@
 ---
 title: "Results for Wellcome Trust Grant Proposal"
-output: html_document
-date: "2024-12-10"
+output: 
+  html_document:
+date: "`r Sys.Date()`"
 ---
 
 ```{r setup, include=FALSE}
@@ -22,6 +23,7 @@ library(forcats) # For reordering factor levels
 library(broom)
 library(MASS)
 library(brant) # test proportional odds assumption for ordinal logistic regression
+library(gt)
 # source in code to load and clean data
 
 ## override mass::select and use dplyr as default
@@ -40,6 +42,9 @@ era5 <- read_csv(here("data", "GRAPHS-ERA5-CHIRPS", "GRAPHS-ERA5-Heatstress-Tw-1
 # load selected temp data
 WBGT_daily_max <- era5 %>%
   dplyr::select(community, date, max_wbgt)  # select relevant columns
+
+WBGT_daily_min <- era5 %>%
+  dplyr::select(community, date, min_wbgt)  # select relevant columns
 
 
 
@@ -83,11 +88,14 @@ WBGT_daily_max <- era5 %>%
 
 ```
 
+
 ## PSS
 
 The Perceived Stress Survey (PSS) was administered as part of the GRAPHS study to assess stress levels among participants during pregnancy and postpartum periods. The survey was conducted during the third trimester for 422 respondents and in the postpartum period for 343 participants. The survey included four questions about participants' perceived control over life events, confidence in managing personal problems, perception of life going their way, and difficulties piling up beyond control. Responses were recorded on a scale from 0 (never) to 4 (very often), with specific questions reverse-coded to calculate the total PSS-4 score. The final score was derived by summing the recoded responses.
 
-To evaluate the relationship between heat exposure and sleep, stress data were paired with daily maximum wet-bulb temperature (WBT) values specific to each participant's community. The analyses and outputs below focus solely on the pre-natal surveys conducted in the third trimester.
+To evaluate the relationship between heat exposure and sleep, stress data were paired with daily maximum Wet Bulb Globe Temperature (WBGT) values specific to each participant's community. The analyses and outputs below focus solely on the pre-natal surveys conducted in the third trimester.
+
+WBGT was selected as the primary temperature metric for this analysis, along with the analyses below, because it is widely recognized as a comprehensive measure of heat stress, capturing the combined effects of temperature, humidity, wind speed, and solar radiation. WBGT is use by military agencies, OSHA, and other organizations as a guide to managing activity level. 
 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
 # LOAD THE PSS DATA
@@ -103,55 +111,10 @@ pss_simple <- pss_recode %>%
 
 ### Distributed Lag Model (DLM)
 
-A Distributed Lag Model (DLM) was employed to assess the relationship between daily maximum wet-bulb temperature (WBT) and perceived stress scores (PSS-4) over a 270-day lag period prior to survey completion. A cross-basis matrix was constructed to account for both the immediate and lagged effects of temperature, using smooth cubic splines to capture non-linear relationships. Predictions were generated relative to the median temperature (26°C) to evaluate how temperature and lagged exposure impact stress levels.
+A Distributed Lag Model (DLM) was employed to assess the relationship between daily maximum WBGT and perceived stress scores (PSS-4) over a 270-day lag period prior to survey completion. A cross-basis matrix was constructed to account for both the immediate and lagged effects of temperature, using smooth cubic splines to capture non-linear relationships. Predictions were generated relative to the median temperature (26°C) to evaluate how temperature and lagged exposure impact stress levels.
 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
 ## SET UP THE DATA FOR DLNM
-
-# Create a sequence of dates for each survey date with lags (LONG FORMAT)
-temperature_lags <- pss_simple %>%
-  filter(diffdays < 0) %>% # focusing just on pre delivery surveys 
-  select(mstudyid, vname, survey_date) %>%
-  mutate(start_date = survey_date - 270) %>%  # define the start of the window
-  rowwise() %>% # perform following operations for each row
-  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
-  unnest(lag_dates) %>%  # expand rows for each date in the list above
-  rename(date = lag_dates) %>%
-
-# Join with temperature data 
-  left_join(WBGT_daily_max, by = c("vname" = "community", "date" = "date"))
-
-# Convert data sets to data.table for efficiency
-setDT(temperature_lags)
-setDT(pss_simple)
-
-# Adjust data set so each lag value is own column (WIDE FORMAT)
-temperature_lags_wide <- dcast(
-  data = temperature_lags,
-  formula = mstudyid + survey_date ~ as.numeric(survey_date - date), # mstudyid + survey_date remain rows, as.numeric(survey_date - date) becomes columns 
-  value.var = "twx", # specifies that twx will populate new columns 
-  fill = NA,  # fill missing values with NA
-  fun.aggregate = mean  # in case of duplicates, take the mean
-)
-
-# Rename columns to match the `temp_lag_` format
-setnames(temperature_lags_wide, old = names(temperature_lags_wide)[3:ncol(temperature_lags_wide)], 
-         new = paste0("temp_lag_", 0:(ncol(temperature_lags_wide) - 3)))
-
-# Join the temp data with the stress data
-temperature_lags_wide <- merge(temperature_lags_wide, pss_simple[, .(mstudyid, survey_date, PSS4)], 
-                       by = c("mstudyid", "survey_date")) %>%
-  filter(!is.na(temp_lag_0)) # remove cases where no temperature data for the participant 
-
-# temp data is matrix of temperature lags for each participant (necessary for DLM)
-temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
-  as.matrix()
-
-
-
-
-
-
 
 # Function to process temperature data for the selected metric
 process_temperature_data <- function(era5_data, metric) {
@@ -219,6 +182,7 @@ model = glm(formula = PSS4 ~ cb, data = temperature_lags_wide, family = "gaussia
 
 # GET PREDICTIONS (in reference to median temp)
 temp_median <- round(median(as.vector(temp_data_matrix)), 1) # centering value (median). 
+pss_temp_median <- temp_median
 
 # generate predictions for a DLNM, set centering value as the median of all temperatures
 cpred = crosspred(cb, 
@@ -232,7 +196,7 @@ cpred = crosspred(cb,
 plot(
   cpred, 
   "contour", 
-  main = "Effects of Temperature and Lag on PSS Relative to \nMedian Temperature (26°C)", 
+  main = paste0("Effects of Temperature and Lag on PSS Relative to \nMedian Temperature (", pss_temp_median, "\u00B0 C)"), 
   xlab = "Temperature (°C)", 
   ylab = "Lag (days)", 
   key.title = title(main = "Change \nin PSS", cex.main = 0.8)
@@ -240,10 +204,10 @@ plot(
 
 
 
-
 # Examine lag effect at top percentile 
 temp_99.9pct = round(quantile(as.vector(temp_data_matrix), 0.999), 1) # third quartile of temperature
-temp_99.9pct = as.numeric(temp_top_pt_pct)
+temp_99.9pct = as.numeric(temp_99.9pct)
+pss_temp_99.9pct <- temp_99.9pct
 
 
 ## Customized plot of effect at top percentile 
@@ -268,16 +232,25 @@ polygon(x = c(names(plot_var_mathigh),
         col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 27.8
 
 abline(h = 0, lty = 2) # add line at effect size = 0
+
+### Save PSS Data for Plotting
+
+# Create a data frame for plotting
+pss_plot_data <- data.frame(
+  lag = as.numeric(names(plot_var_matfit)), 
+  effect = plot_var_matfit, 
+  ci_low = plot_var_matlow, 
+  ci_high = plot_var_mathigh
+)
 ```
+
 
 The plots above illustrate the association between temperature and perceived stress scores (PSS) over various lag periods. Compared to the median temperature, temperatures at the upper extremes, such as those above 31°C, are associated with increased stress scores roughly 4-5 months before the survey date. However, at both longer and shorter lag periods (9 months before the survey and the few weeks before the survey), these extremely high temperatures appear to show a slight, non-significant mitigating effect, with stress scores decreasing relative to the median temperature (26°C).
 
 
-
-
 ### Unadjusted regression
 
-To further investigate the relationship between wet-bulb temperature (WBT) and perceived stress scores (PSS-4) over the pregnancy period, trimester-specific averages and the overall average temperature during pregnancy were computed. For the third trimester and entire pregnancy, average WBT values were calculated only up to the date of the survey to ensure alignment with the stress assessment period. Linear regression models were then used to evaluate the association between PSS-4 and WBT averages for each time period.
+To further investigate the relationship between WBGT and perceived stress scores (PSS-4) over the pregnancy period, trimester-specific averages and the overall average temperature during pregnancy were computed. For the third trimester and entire pregnancy, average WBGT values were calculated only up to the date of the survey to ensure alignment with the stress assessment period. Linear regression models were then used to evaluate the association between PSS-4 and WBGT averages for each time period.
 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
 ## SET UP THE DATA -- find temps over custom periods of interest
@@ -402,7 +375,8 @@ pss_simple_custom_lags_renamed <- pss_simple_custom_lags %>%
     `Average Temp First Trimester` = avg_temp_first_trimester,
     `Average Temp Second Trimester` = avg_temp_second_trimester,
     `Average Temp Third Trimester` = avg_temp_third_trimester
-  )
+  ) %>%
+  rename(`Number of Lifetime Pregnancies` = pregchn)
 
 # Define models for PSS4
 WBGT_daily_max_models_pss_renamed <- list(
@@ -413,7 +387,7 @@ WBGT_daily_max_models_pss_renamed <- list(
   lm(PSS4 ~ `Average Temp Third Trimester`, data = pss_simple_custom_lags_renamed)
 )
 # Display model summaries for PSS4
-stargazer(WBGT_daily_max_models_pss_renamed, type = "text", title = "Regression Results: PSS vs. WBT Temperatures",
+stargazer(WBGT_daily_max_models_pss_renamed, type = "text", title = "Regression Results: PSS vs. WBGT Temperatures",
           column.labels = c("Entire Pregnancy", 
                             "Pre-Conception", 
                             "First Trimester", 
@@ -428,7 +402,7 @@ stargazer(WBGT_daily_max_models_pss_renamed, type = "text", title = "Regression 
 
 The regression analysis explores the association between wet bulb globe temperature (WBGT) and perceived stress scores (PSS-4) during different periods of pregnancy. The results indicate that:
 
--   **Entire Pregnancy**: Higher average daily maximum WBGT during the entire pregnancy is significantly associated with an increase in PSS-4 scores (β = 0.87, p \< 0.01) at the time of the third trimester survey, suggesting that overall heat exposure may elevate perceived stress levels.
+-   **Entire Pregnancy**: Higher average daily maximum WBGT during the entire pregnancy is significantly associated with an increase in PSS-4 scores (β = 0.87, p \< 0.01) at the time of the third trimester survey, suggesting that overall heat exposure may elevate perceived stress levels. For every one degree increase in the average daily maximum WBGT, our model predicts that the perceived stress score would increase on average by 0.87
 
 -   **Trimester-Specific Averages**:  Higher average daily maximum WBGT during the first (β = 0.47, p \< 0.01) and second trimesters (β = 0.59, p \< 0.001) are associated with a significant increase in PSS-4 scores. The third trimester average showed no such effect, indicating that the temperatures nearest to the survey date appear less strongly associated with stress scores. 
 
@@ -436,15 +410,12 @@ The regression analysis explores the association between wet bulb globe temperat
 
 
 
+## Sum NDS Category
 
-
-
-
-## Resilience Score
-
-The resilience score was calculated using data from the Life Events Questionnaire, which assessed participants’ experiences with significant events over the prior six months. Participants were asked if events occurred, and if so, whether they were positive, negative, or neutral. For this analysis, resilience was defined as the proportion of negative events experienced that participants indicated did not have a negative impact on them, using the formula: $1 - \left(\frac{\text{Total Negative Responses}}{\text{Total Events}}\right)$.
+The Sum NDS Category was determined using data from the Life Events Questionnaire, which assessed participants’ experiences with significant events over the prior six months. Participants were asked if events occurred, and if so, whether they were positive, negative, or neutral. Events were categorized into 12 domains, including financial, legal, medical and others. A negative domain score (NDS) was calculated by summing all of the domains for which a participant experienced at least one negatively perceived event. These scores were then classified into three groups: low stress (NDS = 0-2), moderate stress (NDS = 3-5), and high stress (NDS > 5).
 
 The dataset includes responses from 353 participants distributed across three survey periods: the far postnatal period (n = 113), the postpartum period (n = 230), and the third trimester (n = 10). The postpartum period refers to surveys conducted within six weeks after delivery, while far postnatal refers to surveys conducted after that.
+
 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
 ### LOAD THE CRYSIS DATA
@@ -463,46 +434,52 @@ crisis_simple <- crisis_recode %>%
 
 ### Distributed Lag Model
 
-A Distributed Lag Model (DLM) was employed to assess the relationship between daily maximum wet-bulb temperature (WBT) and resilience score over a 270-day lag period prior to survey completion. A cross-basis matrix was constructed to account for both the immediate and lagged effects of temperature, using smooth cubic splines to capture non-linear relationships. Predictions were generated relative to the median temperature (26°C) to evaluate how temperature and lagged exposure impact resilience.
+A Distributed Lag Model (DLM) was employed to assess the relationship between daily maximum WBGT and Sum NDS Category over a 270-day lag period prior to survey completion. A cross-basis matrix was constructed to account for both the immediate and lagged effects of temperature, using smooth cubic splines to capture non-linear relationships. Predictions were generated relative to the median temperature (27.4°C) to evaluate how temperature and lagged exposure impact resilience.
+
 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
-# Create a sequence of dates for each survey date with lags (LONG FORMAT)
-temperature_lags <- crisis_simple %>%
-  select(mstudyid, vname, survey_date) %>%
-  mutate(start_date = survey_date - 270) %>%  # define the start of the window
-  rowwise() %>% # perform following operations for each row
-  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
-  unnest(lag_dates) %>%  # expand rows for each date in the list above
-  rename(date = lag_dates) %>%
 
-# Join with temperature data 
-  left_join(WBGT_daily_max, by = c("vname" = "community", "date" = "time"))
+# Function to process temperature data for the selected metric
+process_temperature_data <- function(era5_data, metric) {
+  era5_data %>%
+    select(community, date, !!sym(metric)) %>%
+    rename(temp_metric = !!sym(metric)) %>%
+    distinct()
+}
 
-# Convert data sets to data.table for efficiency
-setDT(temperature_lags)
-setDT(crisis_simple)
+# Function to create temperature lags
+create_temperature_lags <- function(stress_data, temp_data) {
+  stress_data %>%
+    select(mstudyid, vname, survey_date) %>%
+    mutate(start_date = survey_date - 270) %>%
+    rowwise() %>%
+    mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%
+    unnest(lag_dates) %>%
+    rename(date = lag_dates) %>%
+    left_join(temp_data, by = c("vname" = "community", "date" = "date"))
+}
 
-# Adjust data set so each lag value is own column (WIDE FORMAT)
-temperature_lags_wide <- dcast(
-  data = temperature_lags,
-  formula = mstudyid + survey_date ~ as.numeric(survey_date - date), # mstudyid + survey_date remain rows, as.numeric(survey_date - date) becomes columns 
-  value.var = "twx", # specifies that twx will populate new columns 
-  fill = NA,  # fill missing values with NA
-  fun.aggregate = mean  # in case of duplicates, take the mean
-)
+# Process temp data
+temp_data_clean <- process_temperature_data(era5_data = era5, metric = "max_wbgt")
 
-# Rename columns to match the `temp_lag_` format
-setnames(temperature_lags_wide, old = names(temperature_lags_wide)[3:ncol(temperature_lags_wide)], 
-         new = paste0("temp_lag_", 0:(ncol(temperature_lags_wide) - 3)))
+# created lagged data set
+temperature_lags <- create_temperature_lags(stress_data = crisis_simple, temp_data = temp_data_clean)
 
-# Join the temp data with the stress data
-temperature_lags_wide <- merge(temperature_lags_wide, crisis_simple[, .(mstudyid, survey_date, sum_nds, resilience_score)], 
-                       by = c("mstudyid", "survey_date")) %>%
-  filter(!is.na(temp_lag_0)) # remove cases where no temperature data for the participant 
+# create wide-format lagged data
+temperature_lags_wide <- temperature_lags %>%
+  mutate(lag = as.numeric(survey_date - date)) %>%
+  pivot_wider(names_from = lag, values_from = temp_metric, names_prefix = "temp_lag_") %>%
+  select(mstudyid, survey_date, starts_with("temp_lag_")) %>%
+  group_by(mstudyid, survey_date) %>%
+  reframe(across(starts_with("temp_lag_"), ~ first(na.omit(.)), .names = "{col}")) %>%
+  left_join(crisis_simple %>% select(mstudyid, survey_date, sum_nds_category), by = c("mstudyid", "survey_date")) %>%
+  filter(!is.na(temp_lag_0)) # Remove rows without lag 0 data
 
-# temp data is matrix of temperature lags for each participant (necessary for DLM)
-temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
+# create temperature matrix for cross basis
+temp_data_matrix <- temperature_lags_wide %>%
+  select(starts_with("temp_lag_")) %>%
   as.matrix()
+
 ```
 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
@@ -517,19 +494,24 @@ var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree
 lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
 
 # cross-basis matrix for DLNM
-cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
+cb = crossbasis(temp_data_matrix, lag = c(1, ncol(temp_data_matrix)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
 
+# ordered logistic regression model
+model_polr <- polr(
+  formula = sum_nds_category ~ cb,
+  data = temperature_lags_wide,
+  method = "logistic" 
+)
 
-## FIT MODEL
-model = glm(formula = resilience_score ~ cb, data = temperature_lags_wide, family = "gaussian") # stress scores continuous and normally dist, so gaussian family appropriate
 
 
 # GET PREDICTIONS (in reference to median temp)
-temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
+temp_median <- round(median(as.vector(temp_data_matrix)), 1) # centering value (median). 
+crysis_temp_median <- temp_median
 
 # generate predictions for a DLNM, set centering value as the median of all temperatures
 cpred = crosspred(cb, 
-                  model, 
+                  model_polr, 
                   ci.level = 0.95, # 95% confidence intervals calculated around predicted values
                   cen = temp_median, # predictions are relative to this baseline temperature.
                   by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
@@ -539,17 +521,19 @@ cpred = crosspred(cb,
 plot(
   cpred, 
   "contour", 
-  main = "Effects of Temperature and Lag on Resilience Score \nRelative to Median Temperature (26°C)", 
+  main = paste0("Effects of Temperature and Lag on Log Odds \nof Higher Stress Category Relative \nto Median Temperature (",temp_median, "°C)"), 
   xlab = "Temperature (°C)", 
   ylab = "Lag (days)", 
-  key.title = title(main = "Change in \nResilience \nScore", cex.main = 0.8)
-  )
+  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8)
+)
 
 
 
 # Examine lag effect at top percentile 
-temp_top_pct = round(quantile(as.vector(temp_data), 0.99), 1) # third quartile of temperature
+temp_top_pct = round(quantile(as.vector(temp_data_matrix), 0.99), 1) # third quartile of temperature
 temp_top_pct = as.numeric(temp_top_pct)
+crysis_temp_top_pct = temp_top_pct
+
 
 ## Customized plot of effect at top percentile 
 plot_var = temp_top_pct
@@ -560,21 +544,297 @@ names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
 plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
 names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
 
-plot(x = names(plot_var_matfit),
-       y = plot_var_matfit,
-       xlab = "Lag (days)", ylab = "Effect on Resilience Score",
-       main = paste0("Compared to the Median (", temp_median, "\u00B0 C), the Effect of Temperature \nat the 99th Percentile (", temp_top_pct,"\u00B0 C) is Signficant for Lags 24-145"),
-       type = "l", lwd = 2, ylim = c(min(plot_var_matlow), max(plot_var_mathigh)))  # plot of effect size at exposure/variable = 27.8 relative to median 26
-polygon(x = c(names(plot_var_mathigh),
-              rev(names(plot_var_matlow))),
-        y = c(plot_var_mathigh,
-                rev(plot_var_matlow)),
-        col = rgb(0, 0, 0, alpha = 0.2), border = NA)  # add confidence interval of OR at exposure/variable = 27.8
-abline(h = 0, lty = 2) #  add line at effect size = 0
+plot(
+  x = names(plot_var_matfit),
+  y = plot_var_matfit,
+  xlab = "Lag (days)", 
+  ylab = "Change in Log Odds of Higher Stress Category",
+  main = paste0("Compared to the Median (", temp_median, "\u00B0 C), the Effect of Temperature \nat the 99th Percentile (", temp_top_pct,"\u00B0 C) is Signficant for Lags 134-247"),
+  type = "l", 
+  lwd = 2, 
+  ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
+)
+
+# Add shaded confidence intervals
+polygon(
+  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
+  y = c(plot_var_mathigh, rev(plot_var_matlow)),
+  col = rgb(0, 0, 0, alpha = 0.2), 
+  border = NA
+)
+
+# Add horizontal line at 0
+abline(h = 0, lty = 2)
+
+### SAVE CRYSIS RESULTS FOR PLOTTING  
+
+# Create a data frame for plotting
+crysis_plot_data <- data.frame(
+  lag = as.numeric(names(plot_var_matfit)), 
+  effect = plot_var_matfit, 
+  ci_low = plot_var_matlow, 
+  ci_high = plot_var_mathigh
+)
+
 ```
 
-The plots above illustrate the association between temperature and resilience scores over various lag periods. Compared to the median temperature, temperatures at the upper extremes, such as those above 27.8°C, are associated with decreased resilience scores, particularly during lag periods of 1 to 5 months before the survey date. Beyond this timeframe, the effect diminishes, suggesting a potential adaptation or lessening of the impact of extreme temperatures over longer periods.
+The plots above illustrate the association between temperature and stress score (through Sum NDS Category) over various lag periods. Compared to the median temperature 27.4°C, temperatures at the upper extremes, such as those above 30°C, are associated with increased stress scores roughly 5-8 months before the survey date. 
 
+
+### Unadjusted regression
+
+To further investigate the relationship between daily maximum WBGT and Sum NDS Category score over the pregnancy period, trimester-specific averages and the overall average temperature during pregnancy were computed. For the third trimester and entire pregnancy, average WBGT values were calculated only up to the date of the survey to ensure alignment with the stress assessment period. Linear regression models were then used to evaluate the association between Sum NDS Category and WBGT averages for each time period.
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+### LOAD THE CRYSIS DATA
+
+## CRYSIS data
+crisis_simple <- crisis_recode %>%
+  mutate(
+    quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
+    quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
+    survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
+    select(mstudyid, fin_events:survey_datetime, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
+  select(-c(crireadneg:crikidneg)) %>%
+  mutate(survey_date = as.Date(survey_datetime))  # Extract the date part of survey_datetime
+
+
+calc_custom_temp_avg <- function(stress_data, temp_data, metric) {
+  stress_data %>%
+    rowwise() %>%
+    mutate(
+      # Temperature on the day of the survey
+      avg_temp_day_of_survey = temp_data %>%
+        filter(community == vname, date == survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Temperature the day before the survey
+      avg_temp_day_before_survey = temp_data %>%
+        filter(community == vname, date == survey_date - 1) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the week before the survey
+      avg_temp_week_before_survey = temp_data %>%
+        filter(community == vname, date >= survey_date - 7 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+       # Average temperature for the month before the survey
+      avg_temp_month_before_survey = temp_data %>%
+        filter(community == vname, date >= survey_date - 30 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 3 months before the survey
+      avg_temp_3_months_before = temp_data %>%
+        filter(community == vname, date >= survey_date - 90 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 6 months before the survey
+      avg_temp_6_months_before = temp_data %>%
+        filter(community == vname, date >= survey_date - 180 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      ## TRIMESTER TEMP CALCULATIONS
+      # Estimate conception date (280 days before delivery)
+      
+      # Use gestational age if available, otherwise default to 280 - medical average (not our average) gestation period 
+      gestage_days = ifelse(is.na(gestage_days), 280, gestage_days),
+      
+      # Calculate conception date based on gestational age
+      conception_date = datdeliv - gestage_days,
+  
+      # Pre-conception temperature average (60 days before conception)
+      avg_temp_pre_conception = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date - 60 & date < conception_date
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # First trimester temperature average
+      avg_temp_first_trimester = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date & date < conception_date + 90
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Second trimester temperature average
+      avg_temp_second_trimester = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date + 91 & date < conception_date + 180
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Third trimester temperature average
+      avg_temp_third_trimester = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date + 181 & date <= survey_date
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature across the entire pregnancy
+      avg_temp_entire_pregnancy = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date & date <= survey_date
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp)
+    ) %>%
+    ungroup()
+}
+
+
+
+
+metrics <- "max_wbgt"
+
+# Initialize an empty list to store results
+regression_results_polr <- list()
+
+# Loop through each metric
+for (metric in metrics) {
+  
+  # Calculate custom temperature averages
+  stress_data_with_temp <- calc_custom_temp_avg(crisis_simple, era5, metric)
+  
+  # Fit ordered logistic regressions for the metric
+  models <- list(
+    polr(formula = sum_nds_category ~ avg_temp_day_of_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_day_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_week_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_month_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_3_months_before, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_6_months_before, data = stress_data_with_temp, method = "logistic")
+  )
+  
+  # Save results for the current metric
+  regression_results_polr[[metric]] <- models
+}
+
+
+# List to store regression results and p-values
+regression_results <- list()
+
+# Loop through each metric
+for (metric in metrics) {
+  
+  # Calculate custom temperature averages
+  stress_data_with_temp <- calc_custom_temp_avg(crisis_simple, era5, metric)
+  
+  # Fit models (6 regressions for survey date, 5 for pregnancy period)
+  models <- list(
+    # polr(formula = sum_nds_category ~ avg_temp_day_of_survey, data = stress_data_with_temp, method = "logistic"),
+    # polr(formula = sum_nds_category ~ avg_temp_day_before_survey, data = stress_data_with_temp, method = "logistic"),
+    # polr(formula = sum_nds_category ~ avg_temp_week_before_survey, data = stress_data_with_temp, method = "logistic"),
+    # polr(formula = sum_nds_category ~ avg_temp_month_before_survey, data = stress_data_with_temp, method = "logistic"),
+    # polr(formula = sum_nds_category ~ avg_temp_3_months_before, data = stress_data_with_temp, method = "logistic"),
+    # polr(formula = sum_nds_category ~ avg_temp_6_months_before, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_pre_conception, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_first_trimester, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_second_trimester, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_third_trimester, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_entire_pregnancy, data = stress_data_with_temp, method = "logistic")
+  )
+  
+  # Extract coefficients and p-values for each model
+  model_results <- lapply(models, function(model) {
+    ctable <- coef(summary(model))  # Extract coefficients and standard errors
+    p_values <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2  # Calculate p-values
+    result <- data.frame(Coefficient = ctable[, "Value"], `Std. Error` = ctable[, "Std. Error"], 
+                         `t Value` = ctable[, "t value"], `p Value` = p_values)
+    return(result)
+  })
+  
+  # Store results for the current metric
+  regression_results[[metric]] <- model_results
+}
+
+
+# Combine results into a single data frame for easier reporting
+formatted_results <- lapply(names(regression_results), function(metric) {
+  data <- regression_results[[metric]]
+  model_names <- c(#"Day of Survey", 
+                   # "Day Before Survey", 
+                   # "Week Before Survey", 
+                   # "Month Before Survey", 
+                   # "3 Months Before", 
+                   # "6 Months Before", 
+                   "Pre-Conception", 
+                   "First Trimester", 
+                   "Second Trimester", 
+                   "Third Trimester", 
+                   "Entire Pregnancy")
+  data <- lapply(seq_along(data), function(i) cbind(Model = model_names[i], data[[i]]))
+  data <- do.call(rbind, data)
+  cbind(Metric = metric, data)
+})
+
+# Combine all metrics into a single data frame
+final_results <- do.call(rbind, formatted_results)
+
+# Convert row names to a column
+final_results <- tibble::rownames_to_column(final_results, var = "regression_part")
+
+options(scipen=999)
+
+# Filter out rows with "low|moderate" or "moderate|high1"
+filtered_results <- final_results %>%
+  filter(!grepl("low\\|moderate", regression_part)) %>%
+  filter(!grepl("moderate\\|high", regression_part)) %>%
+  filter(str_detect(regression_part, "avg_temp")) %>%
+  
+  # add exponentiated coefficient for intepretation of 1 degree increase in temp
+  mutate(odds_ratio = exp(Coefficient)) %>%
+
+  # add significant indicator
+  mutate(significant = ifelse(p.Value < 0.05, 1, 0)) 
+
+
+filtered_results %>% 
+  select(Model, Coefficient, Std..Error, odds_ratio, p.Value) %>%
+  rename(
+    `Model` = Model,
+    `Coefficient` = Coefficient,
+    `Std. Error` = Std..Error,
+    `Odds Ratio` = odds_ratio,
+    `P-Value` = p.Value
+  ) %>%
+  gt() %>%
+  fmt_number(
+    columns = c(`Coefficient`, `Std. Error`, `Odds Ratio`, `P-Value`),
+    decimals = 3
+  ) %>%
+  tab_header(
+    title = "Ordered Logistic Regression Results",
+    subtitle = "Higher WBGT during pre-conception, the first trimester, and the entire pregnancy period as a whole associated with increased likelihood of belonging to a higher stress group."
+  ) %>%
+  cols_align(
+    align = "center"
+  )
+```
+
+
+The regression analysis explores the association between wet bulb globe temperature (WBGT) and stress using the Sum NDS Category during different periods of pregnancy. The results indicate that:
+
+-   **Entire Pregnancy**: Higher average daily maximum WBGT during the entire pregnancy is significantly associated with belonging to a higher stress group, with a one degree increase in WBGT associated with a 55.7% increase in the odds of belonging to a higher stress group (p = 0.004).
+
+-   **Pre-Conception**: Higher average daily maximum WBGT during the pre-conception period is significantly associated with belonging to a higher stress group, with a one degree increase in WBGT associated with a 19.3% increase in the odds of belonging to a higher stress group (p = 0.038).
+
+-   **Trimester-Specific Averages**:  Higher average daily maximum WBGT during the first trimester is significantly associated with belonging to a higher stress group, with a one degree increase in WBGT associated with a 35.1% increase in the odds of belonging to a higher stress group (p = 0.002). While the second trimester showed a positive association between temperature and Sum NDS Category, the effect was not significant. The third trimester average showed no effect, indicating that the temperatures nearest to the survey date appear less strongly associated with the Sum NDS Category.  
 
 
 
@@ -582,9 +842,9 @@ The plots above illustrate the association between temperature and resilience sc
 
 Actigraphy data were collected from 156 participants, with some contributing data from multiple studies conducted at two follow-up periods: 4 and 8 years after birth. These studies included single-night (n = 48) and multinight (n = 52) recordings at year 4, as well as single-night (n = 4) and multinight (n = 80) recordings at year 8. For this analysis, data were combined from the four actigraphy studies.
 
-To evaluate the relationship between heat exposure and sleep, actigraphy data were paired with daily maximum wet-bulb temperature (WBT) values specific to each participant's community. The mean WBT was calculated for each participant over their actigraphy study period. One temperature outlier (18.7°C) was excluded due to its high leverage on the model. Additionally, six participants without matching community climate data were removed, resulting in a final dataset of 149 unique participants.
+To evaluate the relationship between heat exposure and sleep, actigraphy data were paired with daily maximum WBGT values specific to each participant's community. The mean WBGT was calculated for each participant over their actigraphy study period. One temperature outlier (18.7°C) was excluded due to its high leverage on the model. Additionally, six participants without matching community climate data were removed, resulting in a final dataset of 149 unique participants.
 
-A linear regression model was employed to examine the association between average WBT and total sleep time (TST), providing insights into the impact of heat on sleep quantity.
+A linear regression model was employed to examine the association between average WBGT and total sleep time (TST), providing insights into the impact of heat on sleep quantity.
 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
 actigraphy_with_temp <- actigraphy_simple_full %>%
@@ -593,9 +853,9 @@ actigraphy_with_temp <- actigraphy_simple_full %>%
     avg_temp = WBGT_daily_max %>%
       filter(
         community == vname,  # Match the community
-        time >= Start.Date & time <= End.Date  # Filter by date range
+        date >= Start.Date & date <= End.Date  # Filter by date range
       ) %>%
-      summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%  # Calculate mean temperature between the start date and end date (for just one night study, this would be a two day average)
+      summarise(mean_temp = mean(max_wbgt, na.rm = TRUE)) %>%  # Calculate mean temperature between the start date and end date (for just one night study, this would be a two day average)
       pull(mean_temp)  # Extract the mean value
   ) %>%
   ungroup() %>% # Remove row-wise grouping 
@@ -627,15 +887,15 @@ actigraphy_with_temp_no_outlier %>%
   geom_smooth(method = "lm") +
   theme_classic(base_size = 15) + # Increase base text size
   labs(
-    x = "Average of Daily Maximum WBT Over Study Period",
+    x = "Average Daily Maximum WBGT Over Study Period",
     y = "Total Sleep Time (mins)",
-    title = "Higher Temperatures Associated with Reduced \nTotal Sleep Time" # 
+    title = "C. Higher Temperatures Associated with Reduced Total Sleep Time" # 
   ) +
   theme(
-    plot.title = element_text(size = 18, face = "bold"), # Adjust title size and style
-    axis.title.x = element_text(size = 16), # Adjust x-axis label size
-    axis.title.y = element_text(size = 16), # Adjust y-axis label size
-    axis.text = element_text(size = 14) # Adjust axis text size
+    plot.title = element_text(size = 16), # Adjust title size and style
+    axis.title.x = element_text(size = 14), # Adjust x-axis label size
+    axis.title.y = element_text(size = 14), # Adjust y-axis label size
+    axis.text = element_text(size = 12) # Adjust axis text size
   ) +
   annotate(
     "text",
@@ -643,163 +903,112 @@ actigraphy_with_temp_no_outlier %>%
     y = 220, 
     label = paste(
       "Slope =", slope, 
-      "\nP =", p_value,
+      "\nP =", p_value
       "\nR² =", r_squared, 
       "\nN =", n
     ),
-    hjust = 0, 
+    hjust = 0.4, 
     vjust = 0.5, 
-    size = 5
+    size = 4
   )
 
 ```
 
-A significant negative association is observed, with a slope of -16.54 (p = 0.0048), indicating that for each degree increase in the average maximum WBT, our model predicts that total sleep time decreases by approximately 16.5 minutes. These findings suggest that higher temperatures during the study period are associated with reduced total sleep duration, which may reflect the challenges of maintaining optimal sleep in warmer conditions.
+A highly significant negative association is observed, with a slope of -13.75 (p < 0.001), indicating that for each degree increase in the average maximum WBGT, our model predicts that total sleep time decreases by approximately 14 minutes. These findings suggest that higher temperatures during the study period are associated with reduced total sleep duration, which may reflect the challenges of maintaining optimal sleep in warmer conditions.
 
 
 
+## Final plots for proposal
 
-## NEW ATTEMPT ORDINAL LOGISTIC REGRESSION 
+```{r}
+PSS_PLOT <- ggplot(pss_plot_data, aes(x = lag, y = effect)) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high), fill = "grey", alpha = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = paste0("(a) Daily Max WBGT of ", pss_temp_99.9pct, "°C Shows Significant Effect on PSS \nCompared to the Median (", pss_temp_median, "°C)"),
+    x = "Lag (days)", 
+    y = "Effect on Perceived \nStress Score (PSS)"
+  ) +
+  scale_x_continuous(breaks = seq(0, max(as.numeric(names(plot_var_matfit))), by = 50)) + # Set tick marks every 50
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14),  # Larger font for axis titles
+    axis.text = element_text(size = 12),   # Larger font for axis labels
+    plot.title = element_text(size = 16, hjust = 0) # Larger font for the title and center alignment
+  )
 
-```{r, echo=FALSE, message = FALSE, warning=FALSE}
-### LOAD THE CRYSIS DATA
 
-## CRYSIS data
-crisis_simple <- crisis_recode %>%
-  mutate(
-    quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
-    quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
-    survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
-    select(mstudyid, fin_events:survey_datetime, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
-  select(-c(crireadneg:crikidneg)) %>%
-  mutate(survey_date = as.Date(survey_datetime))  # Extract the date part of survey_datetime
+# Generate the ggplot
+CRYSIS_PLOT <- ggplot(crysis_plot_data, aes(x = lag, y = effect)) +
+  geom_line(size = 1.2) +  # Line for the effect
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high), fill = "grey", alpha = 0.2) +  # Confidence intervals
+  geom_hline(yintercept = 0, linetype = "dashed") +  # Horizontal line at y = 0
+  labs(
+    title = paste0("(b) Odds of Belonging to Higher Stress Category Increase at ", crysis_temp_top_pct, "\u00B0C \nCompared to the Median (", crysis_temp_median, "\u00B0C)"),
+    x = "Lag (days)", 
+    y = "Change in Log Odds of \nHigher Stress Category"
+  ) +
+  theme_classic() +  # Classic theme for cleaner aesthetics
+  scale_x_continuous(breaks = seq(0, max(as.numeric(names(plot_var_matfit))), by = 50)) + # Set tick marks every 50
+  theme(
+    axis.title = element_text(size = 14),  # Larger font for axis titles
+    axis.text = element_text(size = 12),   # Larger font for axis labels
+    plot.title = element_text(size = 16, hjust = 0)  # Larger font for title and center it
+  )
 
+
+TST_PLOT <- actigraphy_with_temp_no_outlier %>%
+  ggplot(aes(x = avg_temp, y = Sleep.Time..mins.)) +
+  geom_point(alpha = 0.6) + 
+  geom_smooth(method = "lm") +
+  theme_classic(base_size = 15) + # Increase base text size
+  labs(
+    x = "Average Daily Maximum WBGT Over Study Period",
+    y = "Total Sleep Time (mins)",
+    title = "(c) Higher Temperatures Associated with Reduced Total Sleep Time" # 
+  ) +
+  theme(
+    plot.title = element_text(size = 16), # Adjust title size and style
+    axis.title.x = element_text(size = 14), # Adjust x-axis label size
+    axis.title.y = element_text(size = 14), # Adjust y-axis label size
+    axis.text = element_text(size = 12) # Adjust axis text size
+  ) +
+  annotate(
+    "text",
+    x = min(actigraphy_with_temp_no_outlier$avg_temp) + 0.5, 
+    y = 220, 
+    label = paste(
+      "Slope =", slope, 
+      "\nP =", p_value
+      #"\nR² =", r_squared, 
+      #"\nN =", n
+    ),
+    hjust = 0.4, 
+    vjust = 0.5, 
+    size = 4
+  )
+
+
+combined <- PSS_PLOT / CRYSIS_PLOT / TST_PLOT +
+  plot_annotation(
+    title = "Effects of Temperature on Stress and Sleep",
+    theme = theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5) # Large bold title
+  ))
+
+combined
+
+
+
+stress = PSS_PLOT / CRYSIS_PLOT +
+  plot_annotation(
+    title = "Effects of Temperature on Stress",
+    theme = theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5) # Large bold title
+  ))
+
+
+stress
 ```
-
-
-```{r, echo=FALSE, message = FALSE, warning=FALSE}
-# Create a sequence of dates for each survey date with lags (LONG FORMAT)
-temperature_lags <- crisis_simple %>%
-  select(mstudyid, vname, survey_date) %>%
-  mutate(start_date = survey_date - 270) %>%  # define the start of the window
-  rowwise() %>% # perform following operations for each row
-  mutate(lag_dates = list(seq.Date(start_date, survey_date, by = "day"))) %>%  # create a list of dates for each survey
-  unnest(lag_dates) %>%  # expand rows for each date in the list above
-  rename(date = lag_dates) %>%
-
-# Join with temperature data 
-  left_join(WBGT_daily_max, by = c("vname" = "community", "date" = "time"))
-
-# Convert data sets to data.table for efficiency
-setDT(temperature_lags)
-setDT(crisis_simple)
-
-# Adjust data set so each lag value is own column (WIDE FORMAT)
-temperature_lags_wide <- dcast(
-  data = temperature_lags,
-  formula = mstudyid + survey_date ~ as.numeric(survey_date - date), # mstudyid + survey_date remain rows, as.numeric(survey_date - date) becomes columns 
-  value.var = "twx", # specifies that twx will populate new columns 
-  fill = NA,  # fill missing values with NA
-  fun.aggregate = mean  # in case of duplicates, take the mean
-)
-
-# Rename columns to match the `temp_lag_` format
-setnames(temperature_lags_wide, old = names(temperature_lags_wide)[3:ncol(temperature_lags_wide)], 
-         new = paste0("temp_lag_", 0:(ncol(temperature_lags_wide) - 3)))
-
-# Join the temp data with the stress data
-temperature_lags_wide <- merge(temperature_lags_wide, crisis_simple[, .(mstudyid, survey_date, sum_nds, resilience_score, sum_nds_category)], 
-                       by = c("mstudyid", "survey_date")) %>%
-  filter(!is.na(temp_lag_0)) # remove cases where no temperature data for the participant 
-
-# temp data is matrix of temperature lags for each participant (necessary for DLM)
-temp_data <- temperature_lags_wide %>% select(temp_lag_0:temp_lag_270) %>%
-  as.matrix()
-```
-
-```{r, echo=FALSE, message = FALSE, warning=FALSE}
-# set up DLNM model parameters, fit model, and get predictions
-
-## SET UP PARAMS
-
-# predictor DLNM model parameters -- captures the relationship between the predictor variable (temp) and the outcome
-var_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
-
-# lag DLNM model parameters -- captures the lagged effects of the predictor variable (temp) over time.
-lag_arg = list(fun = "bs", df = 4, degree = 3) # smooth cubic polynomial (degree = 3) between the boundary knots (no internal knots)
-
-# cross-basis matrix for DLNM
-cb = crossbasis(temp_data, lag = c(1, ncol(temp_data)), argvar = var_arg, arglag = lag_arg) # basis for the predictor and lag 
-
-# ordered logistic regression model
-model_polr <- polr(
-  formula = sum_nds_category ~ cb,
-  data = temperature_lags_wide,
-  method = "logistic" 
-)
-
-
-
-# GET PREDICTIONS (in reference to median temp)
-temp_median <- round(median(as.vector(temp_data)), 1) # centering value (median). 
-
-# generate predictions for a DLNM, set centering value as the median of all temperatures
-cpred = crosspred(cb, 
-                  model_polr, 
-                  ci.level = 0.95, # 95% confidence intervals calculated around predicted values
-                  cen = temp_median, # predictions are relative to this baseline temperature.
-                  by = 0.1) # predictions are generated at intervals of 0.1 units of temperature
-
-
-# plot contour map of 3d plot
-plot(
-  cpred, 
-  "contour", 
-  main = "Effects of Temperature and Lag on Log Odds of Higher Stress Category \nRelative to Median Temperature (26°C)", 
-  xlab = "Temperature (°C)", 
-  ylab = "Lag (days)", 
-  key.title = title(main = "Change in \nLog Odds", cex.main = 0.8)
-)
-
-
-
-# Examine lag effect at top percentile 
-temp_top_pct = round(quantile(as.vector(temp_data), 0.99), 1) # third quartile of temperature
-temp_top_pct = as.numeric(temp_top_pct)
-
-## Customized plot of effect at top percentile 
-plot_var = temp_top_pct
-plot_var_matfit = cpred$matfit[rownames(cpred$matfit) == plot_var, ]
-names(plot_var_matfit) = sub("lag", "", names(plot_var_matfit))
-plot_var_matlow = cpred$matlow[rownames(cpred$matlow) == plot_var, ]
-names(plot_var_matlow) = sub("lag", "", names(plot_var_matlow))
-plot_var_mathigh = cpred$mathigh[rownames(cpred$mathigh) == plot_var, ]
-names(plot_var_mathigh) = sub("lag", "", names(plot_var_mathigh))
-
-plot(
-  x = names(plot_var_matfit),
-  y = plot_var_matfit,
-  xlab = "Lag (days)", 
-  ylab = "Change in Log Odds of Higher Stress Category",
-  main = paste0("Compared to the Median (", temp_median, "\u00B0 C), the Effect of Temperature \nat the 99th Percentile (", temp_top_pct,"\u00B0 C) is Signficant for Lags 0-169"),
-  type = "l", 
-  lwd = 2, 
-  ylim = c(min(plot_var_matlow), max(plot_var_mathigh))
-)
-
-# Add shaded confidence intervals
-polygon(
-  x = c(names(plot_var_mathigh), rev(names(plot_var_matlow))),
-  y = c(plot_var_mathigh, rev(plot_var_matlow)),
-  col = rgb(0, 0, 0, alpha = 0.2), 
-  border = NA
-)
-
-# Add horizontal line at 0
-abline(h = 0, lty = 2)
-```
-
-
-
-
 
