@@ -19,7 +19,6 @@ era5 <- read_csv(here("data", "GRAPHS-ERA5-CHIRPS", "GRAPHS-ERA5-Heatstress-Tw-1
 precip <- read_csv(here("data", "GRAPHS-ERA5-CHIRPS", "GRAPHS-CHIRPS-Precip.csv"))
 
 
-
 ### EXPLORE DIFFERENCES IN TEMP DATA
 
 original_wbt_comparison_test <- WBT_daily_max %>% 
