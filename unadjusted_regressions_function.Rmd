@@ -1,0 +1,509 @@
+
+---
+title: "Comparison of GRAPHS WBGT wide data to Cascade's Tw WBGT data"
+output: html_document
+date: "2024-12-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# Load necessary libraries
+library(readxl)     # reading Excel files
+library(tidyverse)      # data manipulation
+library(labelled)   # labeling columns 
+library(here) # file paths
+library(haven)
+library(stargazer)
+library(dlnm)
+library(data.table)
+library(forcats) # For reordering factor levels
+library(broom)
+library(MASS)
+library(brant) # test proportional odds assumption for ordinal logistic regression
+# source in code to load and clean data
+
+## override mass::select and use dplyr as default
+select <- dplyr::select 
+
+source(here("clean_stress_data.R")) # pss_recode and crisis_recode and the output datasets of interest
+
+era5 <- read_csv(here("data", "GRAPHS-ERA5-CHIRPS", "GRAPHS-ERA5-Heatstress-Tw-1991missing.csv")) %>%
+  filter(date > as.Date("2013-01-01")) %>%
+  mutate(community = case_when(community == "AKORA/AT" ~ "AKORA",
+                               TRUE ~ community))
+
+
+```
+
+# PSS
+
+```{r}
+# LOAD THE PSS DATA
+pss_simple <- pss_recode %>% 
+  select(mstudyid, survey_datetime, PSS4, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>% # select variables of interest 
+  mutate(survey_date = as.Date(survey_datetime)) %>%  # Extract the date part of survey_datetime 
+  mutate(survey_pre_post_birth = fct_relevel(survey_pre_post_birth, "pre_delivery", "post_delivery")) %>%
+#focus on surveys before pregnancy 
+  filter(survey_pre_post_birth == "pre_delivery") %>%
+  filter(term_at_survey != "second_trimester")
+
+```
+
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+## SET UP THE DATA -- find temps over custom periods of interest
+
+calc_custom_temp_avg <- function(stress_data, temp_data) {
+  stress_data %>%
+    rowwise() %>%  # Perform operations for each row (unique survey observation)
+    mutate(
+      # Temperature on the day of the survey
+      avg_temp_day_of_survey = temp_data %>%
+        filter(community == vname, time == survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Temperature the day before the survey
+      avg_temp_day_before_survey = temp_data %>%
+        filter(community == vname, time == survey_date - 1) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the week before the survey
+      avg_temp_week_before_survey = temp_data %>%
+        filter(community == vname, time >= survey_date - 7 & time < survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 3 months before the survey
+      avg_temp_3_months_before = temp_data %>%
+        filter(community == vname, time >= survey_date - 90 & time < survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 6 months before the survey
+      avg_temp_6_months_before = temp_data %>%
+        filter(community == vname, time >= survey_date - 180 & time < survey_date) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      ## TRIMESTER TEMP CALCULATIONS
+      # Estimate conception date (280 days before delivery)
+      
+      # Use gestational age if available, otherwise default to 280 - medical average (not our average) gestation period 
+      gestage_days = ifelse(is.na(gestage_days), 280, gestage_days),
+      
+      # Calculate conception date based on gestational age
+      conception_date = datdeliv - gestage_days,
+  
+      # Pre-conception temperature average (60 days before conception)
+      avg_temp_pre_conception = temp_data %>%
+        filter(
+          community == vname,
+          time >= conception_date - 60 & time < conception_date
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # First trimester temperature average
+      avg_temp_first_trimester = temp_data %>%
+        filter(
+          community == vname,
+          time >= conception_date & time < conception_date + 90
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Second trimester temperature average
+      avg_temp_second_trimester = temp_data %>%
+        filter(
+          community == vname,
+          time >= conception_date + 91 & time < conception_date + 180
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Third trimester temperature average
+      avg_temp_third_trimester = temp_data %>%
+        filter(
+          community == vname,
+          time >= conception_date + 181 & time <= survey_date # only include up until the survey time
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp),
+     
+       # Average temperature across the entire pregnancy
+      avg_temp_entire_pregnancy = temp_data %>%
+        filter(
+          community == vname,  
+          time >= conception_date & time <= survey_date  # Filter pregnancy period estimated as 280 days before delivery. Only include up until the survey time. 
+        ) %>%
+        summarise(mean_temp = mean(twx, na.rm = TRUE)) %>%
+        pull(mean_temp)  
+      
+    ) %>%
+    ungroup()  # Remove row-wise grouping
+}
+
+# Add custom periods
+pss_simple_custom_lags <- calc_custom_temp_avg(pss_simple, WBT_daily_max)
+```
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# Define models for PSS4
+wbt_daily_max_models_pss_renamed <- list(
+  lm(PSS4 ~ `Average Temp Entire Pregnancy`, data = pss_simple_custom_lags_renamed),
+  lm(PSS4 ~ `Average Temp Pre-Conception`, data = pss_simple_custom_lags_renamed),
+  lm(PSS4 ~ `Average Temp First Trimester`, data = pss_simple_custom_lags_renamed),
+  lm(PSS4 ~ `Average Temp Second Trimester`, data = pss_simple_custom_lags_renamed),
+  lm(PSS4 ~ `Average Temp Third Trimester`, data = pss_simple_custom_lags_renamed)
+)
+# Display model summaries for PSS4
+stargazer(wbt_daily_max_models_pss_renamed, type = "text", title = "Regression Results: PSS vs. WBT Temperatures",
+          column.labels = c("Entire Pregnancy", 
+                            "Pre-Conception", 
+                            "First Trimester", 
+                            "Second Trimester", 
+                            "Third Trimester"),
+          dep.var.labels = "Perceived Stress Score", 
+          omit.stat = c("f", "ser"), 
+          no.space = TRUE, digits = 2,
+          star.cutoffs = c(0.05, 0.01, 0.001)) # Custom significance levels)
+```
+
+
+
+
+
+### FUNCTION LOOP
+
+```{r}
+metrics <- c(
+  "max_hi", "max_wbgt", "max_tw", "max_t2mC",
+  "min_hi", "min_wbgt", "min_tw", "min_t2mC",
+  "mean_hi", "mean_wbgt", "mean_tw", "mean_t2mC"
+)
+
+
+
+
+calc_custom_temp_avg <- function(stress_data, temp_data, metric) {
+  stress_data %>%
+    rowwise() %>%
+    mutate(
+      # Temperature on the day of the survey
+      avg_temp_day_of_survey = temp_data %>%
+        filter(community == vname, date == survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Temperature the day before the survey
+      avg_temp_day_before_survey = temp_data %>%
+        filter(community == vname, date == survey_date - 1) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the week before the survey
+      avg_temp_week_before_survey = temp_data %>%
+        filter(community == vname, date >= survey_date - 7 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+       # Average temperature for the month before the survey
+      avg_temp_month_before_survey = temp_data %>%
+        filter(community == vname, date >= survey_date - 30 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 3 months before the survey
+      avg_temp_3_months_before = temp_data %>%
+        filter(community == vname, date >= survey_date - 90 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature for the 6 months before the survey
+      avg_temp_6_months_before = temp_data %>%
+        filter(community == vname, date >= survey_date - 180 & date < survey_date) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      ## TRIMESTER TEMP CALCULATIONS
+      # Estimate conception date (280 days before delivery)
+      
+      # Use gestational age if available, otherwise default to 280 - medical average (not our average) gestation period 
+      gestage_days = ifelse(is.na(gestage_days), 280, gestage_days),
+      
+      # Calculate conception date based on gestational age
+      conception_date = datdeliv - gestage_days,
+  
+      # Pre-conception temperature average (60 days before conception)
+      avg_temp_pre_conception = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date - 60 & date < conception_date
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # First trimester temperature average
+      avg_temp_first_trimester = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date & date < conception_date + 90
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Second trimester temperature average
+      avg_temp_second_trimester = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date + 91 & date < conception_date + 180
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Third trimester temperature average
+      avg_temp_third_trimester = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date + 181 & date <= survey_date
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp),
+      
+      # Average temperature across the entire pregnancy
+      avg_temp_entire_pregnancy = temp_data %>%
+        filter(
+          community == vname,
+          date >= conception_date & date <= survey_date
+        ) %>%
+        summarise(mean_temp = mean(!!sym(metric), na.rm = TRUE)) %>%
+        pull(mean_temp)
+    ) %>%
+    ungroup()
+}
+
+
+
+
+
+
+for (metric in metrics) {
+  message("Processing metric: ", metric)
+  
+  # Calculate custom temperature averages
+  stress_data_with_temp <- calc_custom_temp_avg(pss_simple, era5, metric)
+  
+  # Fit unadjusted regressions for the metric
+  models <- list(
+    lm(PSS4 ~ avg_temp_day_of_survey, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_day_before_survey, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_week_before_survey, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_month_before_survey, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_3_months_before, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_6_months_before, data = stress_data_with_temp)
+  )
+  
+  # Save results for the current metric
+  regression_results[[metric]] <- models
+}
+
+
+
+
+# Example using stargazer
+for (metric in metrics) {
+  models <- regression_results[[metric]]
+  stargazer(models, type = "text", title = paste("Regression Results for", trimws(gsub("_", " ", metric))),
+            column.labels = c("Day of Survey", "Day Before Survey", "Week Before Survey", "Month Before Survey", 
+                              "3 Months Before Survey", "6 Months Before Survey"),
+            dep.var.labels = "Perceived Stress Score", 
+            omit.stat = c("f", "ser"), 
+            no.space = TRUE, digits = 2,
+            star.cutoffs = c(0.05, 0.01, 0.001))
+}
+
+
+
+
+
+for (metric in metrics) {
+  message("Processing metric: ", metric)
+  
+  # Calculate custom temperature averages
+  stress_data_with_temp <- calc_custom_temp_avg(pss_simple, era5, metric)
+  
+  # Fit unadjusted regressions for the metric
+  models <- list(
+    lm(PSS4 ~ avg_temp_entire_pregnancy, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_pre_conception, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_first_trimester, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_second_trimester, data = stress_data_with_temp),
+    lm(PSS4 ~ avg_temp_third_trimester, data = stress_data_with_temp)
+  )
+  
+  # Save results for the current metric
+  regression_results[[metric]] <- models
+}
+
+
+# Example using stargazer
+for (metric in metrics) {
+  models <- regression_results[[metric]]
+  stargazer(models, type = "text", title = paste("Regression Results for", trimws(gsub("_", " ", metrics))),
+            column.labels = c("Entire Pregnancy", "Day of Survey", "Pre-Conception", 
+                              "First Trimester", "Second Trimester", "Third Trimester"),
+            dep.var.labels = "Perceived Stress Score", 
+            omit.stat = c("f", "ser"), 
+            no.space = TRUE, digits = 2,
+            star.cutoffs = c(0.05, 0.01, 0.001))
+}
+
+
+```
+
+
+# Crysis 
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+### LOAD THE CRYSIS DATA
+
+## CRYSIS data
+crisis_simple <- crisis_recode %>%
+  mutate(
+    quessetdt = sprintf("%04d", quessetdt),  # Ensure quassetdt has 4 digits
+    quessetdt = sub("(\\d{2})(\\d{2})", "\\1:\\2", quessetdt),  # Insert colon
+    survey_datetime = as.POSIXct(paste(quessetd, quessetdt), format = "%Y-%m-%d %H:%M")) %>%
+    select(mstudyid, fin_events:survey_datetime, datdeliv:survey_pre_post_birth, gestage_days, married, wealthindex, age, medlev, fan, pregchn) %>%
+  select(-c(crireadneg:crikidneg)) %>%
+  mutate(survey_date = as.Date(survey_datetime))  # Extract the date part of survey_datetime
+
+
+
+
+# Initialize an empty list to store results
+regression_results_polr <- list()
+
+# Loop through each metric
+for (metric in metrics) {
+  message("Processing metric: ", metric)
+  
+  # Calculate custom temperature averages
+  stress_data_with_temp <- calc_custom_temp_avg(crisis_simple, era5, metric)
+  
+  # Fit ordered logistic regressions for the metric
+  models <- list(
+    polr(formula = sum_nds_category ~ avg_temp_day_of_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_day_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_week_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_month_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_3_months_before, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_6_months_before, data = stress_data_with_temp, method = "logistic")
+  )
+  
+  # Save results for the current metric
+  regression_results_polr[[metric]] <- models
+}
+
+
+
+
+```
+
+
+
+```{r}
+stress_data_with_max_hi <- calc_custom_temp_avg(crisis_simple, era5, "max_hi")
+
+m <- polr(sum_nds_category ~ avg_temp_day_of_survey, data = stress_data_with_max_hi, Hess=TRUE)
+
+summary(m)
+
+ctable <- coef(summary(m))
+
+## calculate and store p values
+p <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2
+
+## combined table
+ctable <- cbind(ctable, "p value" = p)
+ctable
+```
+
+
+
+```{r}
+# List to store regression results and p-values
+regression_results <- list()
+
+# Loop through each metric
+for (metric in metrics) {
+  message("Processing metric: ", metric)
+  
+  # Calculate custom temperature averages
+  stress_data_with_temp <- calc_custom_temp_avg(crisis_simple, era5, metric)
+  
+  # Fit models (6 regressions for survey date, 5 for pregnancy period)
+  models <- list(
+    polr(formula = sum_nds_category ~ avg_temp_day_of_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_day_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_week_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_month_before_survey, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_3_months_before, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_6_months_before, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_pre_conception, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_first_trimester, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_second_trimester, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_third_trimester, data = stress_data_with_temp, method = "logistic"),
+    polr(formula = sum_nds_category ~ avg_temp_entire_pregnancy, data = stress_data_with_temp, method = "logistic")
+  )
+  
+  # Extract coefficients and p-values for each model
+  model_results <- lapply(models, function(model) {
+    ctable <- coef(summary(model))  # Extract coefficients and standard errors
+    p_values <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2  # Calculate p-values
+    result <- data.frame(Coefficient = ctable[, "Value"], `Std. Error` = ctable[, "Std. Error"], 
+                         `t Value` = ctable[, "t value"], `p Value` = p_values)
+    return(result)
+  })
+  
+  # Store results for the current metric
+  regression_results[[metric]] <- model_results
+}
+
+
+# Combine results into a single data frame for easier reporting
+formatted_results <- lapply(names(regression_results), function(metric) {
+  data <- regression_results[[metric]]
+  model_names <- c("Day of Survey", "Day Before Survey", "Week Before Survey", "Month Before Survey", 
+                   "3 Months Before", "6 Months Before", "Pre-Conception", 
+                   "First Trimester", "Second Trimester", "Third Trimester", "Entire Pregnancy")
+  data <- lapply(seq_along(data), function(i) cbind(Model = model_names[i], data[[i]]))
+  data <- do.call(rbind, data)
+  cbind(Metric = metric, data)
+})
+
+# Combine all metrics into a single data frame
+final_results <- do.call(rbind, formatted_results)
+
+# Convert row names to a column
+final_results <- tibble::rownames_to_column(final_results, var = "regression_part")
+
+options(scipen=999)
+
+# Filter out rows with "low|moderate" or "moderate|high1"
+filtered_results <- final_results %>%
+  filter(!grepl("low\\|moderate", regression_part)) %>%
+  filter(!grepl("moderate\\|high", regression_part)) %>%
+  
+  # add exponentiated coefficient for intepretation of 1 degree increase in temp
+  mutate(odds_ratio = exp(Coefficient)) %>%
+
+  # add significant indicator
+  mutate(significant = ifelse(p.Value < 0.05, 1, 0)) 
+
+```
+
