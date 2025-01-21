@@ -903,7 +903,7 @@ actigraphy_with_temp_no_outlier %>%
     y = 220, 
     label = paste(
       "Slope =", slope, 
-      "\nP =", p_value
+      "\nP =", p_value,
       "\nR² =", r_squared, 
       "\nN =", n
     ),
