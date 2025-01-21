@@ -39,3 +39,8 @@ actigraphy_simple_full <- rbind(multinight_y4_final_simple,
     Start.Date = mdy(Start.Date), 
     End.Date = mdy(End.Date)
   )
+
+y4 <- rbind(multinight_y4_final_simple, singlenight_y4_final_simple)
+y8 <- rbind(multinight_y8_final_simple, singlenight_y8_final_simple)
+multinight <- rbind(multinight_y4_final_simple, multinight_y8_final_simple)
+singlenight <- rbind(singlenight_y4_final_simple, singlenight_y8_final_simple)
